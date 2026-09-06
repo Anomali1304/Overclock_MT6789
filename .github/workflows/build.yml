@@ -55,7 +55,18 @@ jobs:
         run: |
           cd ~/OSS/common
           CLANG_PREBUILT_BIN=$(grep -E '^CLANG_PREBUILT_BIN=' build.config.common | cut -d= -f2)
+          echo "Resolved CLANG_PREBUILT_BIN: '$CLANG_PREBUILT_BIN'"
+          if [ -z "$CLANG_PREBUILT_BIN" ] || [ ! -d "$HOME/OSS/$CLANG_PREBUILT_BIN" ]; then
+            echo "::error::CLANG_PREBUILT_BIN not found in build.config.common, or the resolved directory doesn't exist."
+            echo "build.config.common contents (Clang-related lines):"
+            grep -i clang build.config.common || true
+            echo "Actual prebuilt clang dirs on disk:"
+            find "$HOME/OSS/prebuilts-master/clang" -maxdepth 3 -type d 2>/dev/null || find "$HOME/OSS" -maxdepth 4 -iname "clang-r*" 2>/dev/null || true
+            exit 1
+          fi
           export PATH="$HOME/OSS/$CLANG_PREBUILT_BIN:$PATH"
+          echo "Using clang: $(which clang)"
+          clang --version
           # gki_defconfig is the standard GKI aarch64 defconfig target name.
           # If this branch names it differently, list what's available so the
           # failure is loud and obvious instead of silently building nothing.
