@@ -1,4 +1,3 @@
-
 KDIR      ?= $(HOME)/OSS/common
 WORKSPACE ?= $(HOME)/OSS
 ARCH      := arm64
@@ -38,7 +37,7 @@ all:
 	fi
 	@echo "  [overclock_mt6789] Using Clang: $(CLANG_PATH)/clang"
 	@$(CLANG_PATH)/clang --version 2>/dev/null | head -1
-	$(MAKE) -C $(KDIR) M=$(CURDIR) \
+	PATH="$(CLANG_PATH):$$PATH" $(MAKE) -C $(KDIR) M=$(CURDIR) \
 	  ARCH=$(ARCH) \
 	  CC=$(CC) \
 	  CLANG_TRIPLE=$(CLANG_TRIPLE) \
