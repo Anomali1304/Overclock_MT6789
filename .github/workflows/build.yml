@@ -3,7 +3,15 @@ name: Build
 on:
   push:
     branches: [main, master]
+    paths:
+      - 'overclock_mt6789.c'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
   pull_request:
+    paths:
+      - 'overclock_mt6789.c'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 env:
@@ -88,22 +96,15 @@ jobs:
         working-directory: overclock_mt6789
         run: make WORKSPACE="$HOME/OSS" KDIR="$HOME/OSS/common"
 
-      - name: Build release (strip debug info)
-        working-directory: overclock_mt6789
-        run: make release WORKSPACE="$HOME/OSS" KDIR="$HOME/OSS/common"
-
       - name: Verify output
         working-directory: overclock_mt6789
         run: |
           test -f overclock_mt6789.ko
-          test -f overclock_mt6789-release.ko
-          ls -lh overclock_mt6789.ko overclock_mt6789-release.ko
+          ls -lh overclock_mt6789.ko
           strings overclock_mt6789.ko | grep '^vermagic='
 
-      - name: Upload build artifacts
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: overclock_mt6789.ko
-          path: |
-            overclock_mt6789/overclock_mt6789.ko
-            overclock_mt6789/overclock_mt6789-release.ko
+          path: overclock_mt6789/overclock_mt6789.ko
