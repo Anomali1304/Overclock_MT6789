@@ -46,20 +46,16 @@ all:
 	  LLVM_IAS=1 \
 	  EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
 	  modules
+	@if [ -x "$(CLANG_PATH)/llvm-strip" ]; then \
+		$(CLANG_PATH)/llvm-strip --strip-debug overclock_mt6789.ko; \
+		echo "  [overclock_mt6789] Stripped debug info:"; \
+		ls -lh overclock_mt6789.ko; \
+	else \
+		echo "WARNING: llvm-strip not found at $(CLANG_PATH) — shipping unstripped .ko."; \
+	fi
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
-	rm -f overclock_mt6789-release.ko
-
-release: all
-	@if [ ! -x "$(CLANG_PATH)/llvm-strip" ]; then \
-		echo "ERROR: llvm-strip not found at $(CLANG_PATH) — check WORKSPACE and repo sync."; \
-		exit 1; \
-	fi
-	cp overclock_mt6789.ko overclock_mt6789-release.ko
-	$(CLANG_PATH)/llvm-strip --strip-debug overclock_mt6789-release.ko
-	@echo "  [overclock_mt6789] Release build (debug info stripped):"
-	@ls -lh overclock_mt6789.ko overclock_mt6789-release.ko
 
 install:
 	adb push overclock_mt6789.ko /data/local/tmp/
