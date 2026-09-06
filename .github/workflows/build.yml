@@ -67,17 +67,18 @@ jobs:
           export PATH="$HOME/OSS/$CLANG_PREBUILT_BIN:$PATH"
           echo "Using clang: $(which clang)"
           clang --version
+          MAKE_TOOLCHAIN_ARGS="ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1"
           # gki_defconfig is the standard GKI aarch64 defconfig target name.
           # If this branch names it differently, list what's available so the
           # failure is loud and obvious instead of silently building nothing.
           # No O=out: our own Makefile expects KDIR itself to be the built
           # tree (.config, Module.symvers, include/generated all in-tree).
-          if ! make ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig; then
+          if ! make $MAKE_TOOLCHAIN_ARGS gki_defconfig; then
             echo "::error::gki_defconfig target not found. Available configs:"
             ls arch/arm64/configs/
             exit 1
           fi
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
+          make $MAKE_TOOLCHAIN_ARGS -j"$(nproc)" modules_prepare
 
       - name: check-clang
         working-directory: overclock_mt6789
