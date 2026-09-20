@@ -118,7 +118,7 @@ static void __iomem *g_apmixed_va;
 
 #define POSDIV_2_MAX_FREQ  1750000U
 #define POSDIV_4_MIN_FREQ  375000U
-#define VGPU_MAX_VOLT      100000U
+#define VGPU_MAX_VOLT      120000U
 #define VGPU_MIN_VOLT      50000U
 
 #define GPU_OPP_MAX 72
