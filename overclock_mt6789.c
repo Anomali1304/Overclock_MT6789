@@ -537,6 +537,19 @@ MODULE_PARM_DESC(cpu_ll_target_khz, "Little cluster idx0 target freq in KHz (0=l
 module_param(cpu_b_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_b_target_khz, "Big cluster idx0 target freq in KHz (0=leave alone)");
 
+/* Voltage follows frequency: when an idx0 target above stock is applied, the
+ * voltage field (LUT_VOLT) of the same LUT word is raised in the same write.
+ * The slope (raw volt per MHz) is taken from the cluster's own stock rows 1
+ * and 3 (row 0 is skipped: on big it is clamped to the same volt as row 1). */
+#define CPU_VOLT_ABS_MAX_RAW  100000U	/* 1000 mV hard ceiling, raw = mV*100 */
+
+static unsigned int cpu_volt_follow        = 1;
+static unsigned int cpu_volt_max_delta_raw = 3000;	/* 30 mV over stock idx0 */
+module_param(cpu_volt_follow, uint, 0644);
+MODULE_PARM_DESC(cpu_volt_follow, "1=raise idx0 voltage together with freq (slope from stock rows 1..3), 0=freq only");
+module_param(cpu_volt_max_delta_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_volt_max_delta_raw, "Max voltage raise over stock idx0, raw (mV*100). Apply is refused if the computed raise is larger");
+
 static char cpu_oc_result[256] = "not applied yet";
 static int cpu_oc_result_get(char *buf, const struct kernel_param *kp)
 {
@@ -547,6 +560,7 @@ module_param_cb(cpu_oc_result, &cpu_oc_result_ops, NULL, 0444);
 MODULE_PARM_DESC(cpu_oc_result, "CPU OC status (read-only)");
 
 static unsigned int g_ll_orig_khz, g_b_orig_khz;
+static unsigned int g_ll_orig_volt, g_b_orig_volt;	/* raw LUT_VOLT of stock idx0 */
 static bool         g_ll_have_orig, g_b_have_orig;
 
 #define QUIESCE_POLL_US     500U
@@ -596,12 +610,16 @@ static int patch_em_table(unsigned int rep_cpu, unsigned int use_khz)
 }
 
 static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
-			       unsigned int *orig_khz, bool *have_orig)
+			       unsigned int *orig_khz, unsigned int *orig_volt,
+			       bool *have_orig)
 {
 	struct cpufreq_policy *policy;
 	struct cpufreq_mtk_mirror *c;
 	struct freq_qos_request qos_req;
-	unsigned int use_khz, cap_khz, old_max;
+	unsigned int use_khz, cap_khz, old_max, new_volt;
+	void __iomem *lut;
+	bool first;
+	s64 dv = 0;
 	u32 raw;
 	int ret;
 
@@ -614,9 +632,13 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		return -ENODATA;
 	}
 	c = (struct cpufreq_mtk_mirror *)policy->driver_data;
+	lut = c->reg_bases[REG_FREQ_LUT_TABLE];
 
-	if (!*have_orig) {
+	first = !*have_orig;
+	if (first) {
 		*orig_khz = policy->freq_table[0].frequency;
+		raw = readl_relaxed(lut);
+		*orig_volt = FIELD_GET(LUT_VOLT, raw);
 		*have_orig = true;
 	}
 
@@ -627,24 +649,62 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		if (cap_khz > MAX_OC_ABSOLUTE_KHZ)
 			cap_khz = MAX_OC_ABSOLUTE_KHZ;
 		if (target_khz > cap_khz) {
+			if (first)
+				*have_orig = false;
 			cpufreq_cpu_put(policy);
 			return -ERANGE;
 		}
 		use_khz = target_khz;
 	}
 
+	/* Computed before touching anything, so a refusal leaves hardware as-is. */
+	if (cpu_volt_follow && use_khz > *orig_khz) {
+		if (c->nr_opp >= 4) {
+			u32 r1 = readl_relaxed(lut + 1 * LUT_ROW_SIZE);
+			u32 r3 = readl_relaxed(lut + 3 * LUT_ROW_SIZE);
+			int df  = (int)FIELD_GET(LUT_FREQ, r1) - (int)FIELD_GET(LUT_FREQ, r3);
+			int dvs = (int)FIELD_GET(LUT_VOLT, r1) - (int)FIELD_GET(LUT_VOLT, r3);
+
+			if (df > 0 && dvs > 0)
+				dv = ((s64)dvs * (int)(use_khz / 1000 - *orig_khz / 1000)) / df;
+			else
+				pr_warn("oc_mt6789: cpu%u: no usable volt slope in stock rows 1/3 — freq only\n",
+					rep_cpu);
+		} else {
+			pr_warn("oc_mt6789: cpu%u: nr_opp<4, cannot derive volt slope — freq only\n",
+				rep_cpu);
+		}
+
+		if (dv > (s64)cpu_volt_max_delta_raw ||
+		    (s64)*orig_volt + dv > (s64)CPU_VOLT_ABS_MAX_RAW) {
+			pr_err("oc_mt6789: cpu%u: needs +%lld raw volt (limit %u, abs max %u) — refused\n",
+			       rep_cpu, dv, cpu_volt_max_delta_raw, CPU_VOLT_ABS_MAX_RAW);
+			if (first)
+				*have_orig = false;
+			cpufreq_cpu_put(policy);
+			return -EOVERFLOW;
+		}
+	}
+	new_volt = *orig_volt + (unsigned int)dv;
 
 	old_max = policy->max;
 
 	ret = quiesce_off_idx0(policy, c, &qos_req);
 	if (ret) {
+		if (first)
+			*have_orig = false;
 		cpufreq_cpu_put(policy);
 		return ret;
 	}
 
-	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + (0 * LUT_ROW_SIZE));
-	raw = (raw & ~LUT_FREQ) | FIELD_PREP(LUT_FREQ, use_khz / 1000);
-	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE] + (0 * LUT_ROW_SIZE));
+	/* Freq and volt share one 32-bit word: a single write changes both. */
+	raw = readl_relaxed(lut + (0 * LUT_ROW_SIZE));
+	raw = (raw & ~(LUT_FREQ | LUT_VOLT)) |
+	      FIELD_PREP(LUT_FREQ, use_khz / 1000) |
+	      FIELD_PREP(LUT_VOLT, new_volt);
+	writel_relaxed(raw, lut + (0 * LUT_ROW_SIZE));
+	pr_info("oc_mt6789: cpu%u idx0 %u->%u KHz, volt raw %u->%u (/100=mV)\n",
+		rep_cpu, *orig_khz, use_khz, *orig_volt, new_volt);
 
 	down_write(&policy->rwsem);
 	policy->freq_table[0].frequency = use_khz;
@@ -684,15 +744,19 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 
 	if (cpu_ll_target_khz || g_ll_have_orig)
 		ret_ll = patch_cluster_idx0(cpu_ll_rep_cpu, cpu_ll_target_khz,
-					     &g_ll_orig_khz, &g_ll_have_orig);
+					     &g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
 	if (cpu_b_target_khz || g_b_have_orig)
 		ret_b = patch_cluster_idx0(cpu_b_rep_cpu, cpu_b_target_khz,
-					    &g_b_orig_khz, &g_b_have_orig);
+					    &g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
 
 	if (ret_ll == -ERANGE || ret_b == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: target exceeds OC limit (ll=%u b=%u KHz)",
 			 cpu_ll_target_khz, cpu_b_target_khz);
+	else if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW)
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "FAIL: needed voltage raise exceeds cpu_volt_max_delta_raw=%u (see dmesg oc_mt6789)",
+			 cpu_volt_max_delta_raw);
 	else if (ret_ll == -ETIMEDOUT || ret_b == -ETIMEDOUT)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: cluster would not leave idx0 within %ums",
@@ -1035,6 +1099,9 @@ static int __init oc_mt6789_init(void)
 	pr_info("oc_mt6789: CPU safety cap = stock +%d%%, %uMHz absolute ceiling (whichever is lower); raise in small steps and stress-test between each\n",
 		MAX_OC_PERCENT_OVER_STOCK, MAX_OC_ABSOLUTE_KHZ / 1000);
 
+	pr_info("oc_mt6789: CPU volt follow=%u, max raise %u raw, abs ceiling %u raw (raw/100=mV)\n",
+		cpu_volt_follow, cpu_volt_max_delta_raw, CPU_VOLT_ABS_MAX_RAW);
+
 	ret = register_pm_notifier(&oc_mt6789_pm_nb);
 	if (ret)
 		pr_warn("oc_mt6789: register_pm_notifier failed (%d) — suspend guard inactive\n", ret);
@@ -1147,9 +1214,9 @@ static void __exit oc_mt6789_exit(void)
 	mutex_lock(&oc_lock);
 	gpu_restore_working_table();
 	if (g_ll_have_orig)
-		patch_cluster_idx0(cpu_ll_rep_cpu, 0, &g_ll_orig_khz, &g_ll_have_orig);
+		patch_cluster_idx0(cpu_ll_rep_cpu, 0, &g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
 	if (g_b_have_orig)
-		patch_cluster_idx0(cpu_b_rep_cpu, 0, &g_b_orig_khz, &g_b_have_orig);
+		patch_cluster_idx0(cpu_b_rep_cpu, 0, &g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
 	mutex_unlock(&oc_lock);
 
 	if (g_apmixed_va) {
