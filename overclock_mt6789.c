@@ -879,21 +879,37 @@ static void dump_one_cpu(int cpu, char *buf, size_t *off, size_t bufsize,
 	*off += scnprintf(buf + *off, bufsize - *off,
 		"\n=== cpu%d domain (nr_opp=%d, cur_idx=%u) ===\n", cpu, c->nr_opp, cur_idx);
 	*off += scnprintf(buf + *off, bufsize - *off,
-		"[idx] sw_freq(RAM)   hw_freq(MMIO)   match?\n");
+		"[idx] sw_freq(RAM)   hw_freq(MMIO)   match?   raw32       bits[19:12]  bits[31:20]\n");
+	*off += scnprintf(buf + *off, bufsize - *off,
+		"      (bit ranges di atas cuma dugaan awal berdasarkan layout LUT cpufreq-hw yang umum;\n"
+		"       bandingkan pola angkanya manual sama mV di eem_cur_volt per index yang sama)\n");
 
 	for (i = 0; i < c->nr_opp && i < LUT_MAX_ENTRIES; i++) {
 		unsigned int sw_freq = policy->freq_table[i].frequency;
 		u32 raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + (i * LUT_ROW_SIZE));
 		unsigned int hw_freq = FIELD_GET(LUT_FREQ, raw) * 1000;
+		/* Kandidat field non-freq, BELUM dikonfirmasi artinya apa.
+		 * Cuma buat inspeksi manual/korelasi, TIDAK dipakai buat nulis apapun. */
+		u32 mid_bits  = (raw >> 12) & 0xFF;   /* bits[19:12], 8 bit */
+		u32 high_bits = (raw >> 20) & 0xFFF;  /* bits[31:20], 12 bit sisa */
 		const char *mark = (i == cur_idx) ? "*" : " ";
 		const char *match = (sw_freq == hw_freq) ? "OK" : "MISMATCH";
 
 		*off += scnprintf(buf + *off, bufsize - *off,
-			"[%2d]%s %10u KHz  %10u KHz   %s\n", i, mark, sw_freq, hw_freq, match);
+			"[%2d]%s %10u KHz  %10u KHz   %-8s 0x%08x  0x%02x (%3u)  0x%03x (%4u)\n",
+			i, mark, sw_freq, hw_freq, match, raw, mid_bits, mid_bits, high_bits, high_bits);
 
 		if (*off >= bufsize - 128)
 			return;
 	}
+	*off += scnprintf(buf + *off, bufsize - *off,
+		"\nCara pakai: sambil cat ini, cat juga /proc/eem_lite/eem_cur_volt.\n"
+		"Urutkan idx berdasar freq turun, taruh berdampingan sama mV di eem_cur_volt\n"
+		"buat cluster yang sama. Kalau salah satu kolom (mid_bits/high_bits) naik-turun\n"
+		"searah sama mV pas freq berubah, itu kandidat kuat field voltage/vsel.\n"
+		"Kalau semua idx nilainya SAMA PERSIS di kedua kolom itu, berarti bukan field\n"
+		"volt (kemungkinan reserved/fixed), dan voltage kemungkinan besar memang\n"
+		"di-drive dari luar register ini (firmware/EEM terpisah).\n");
 
 	cpufreq_cpu_put(policy);
 }
