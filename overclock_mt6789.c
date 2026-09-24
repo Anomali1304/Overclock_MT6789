@@ -478,6 +478,25 @@ MODULE_PARM_DESC(gpu_oc_apply, "Write 1 to apply gpu_target_khz/volt/vsram to OP
 #define LUT_FREQ          GENMASK(11, 0)
 #define LUT_ROW_SIZE      0x4
 
+/*
+ * Ditemukan lewat korelasi manual vs /proc/eem_lite/eem_cur_volt (BUKAN dari
+ * datasheet/source resmi) -- perlakukan sebagai hipotesis kuat, bukan fakta:
+ *
+ *   bits[28:12] (17 bit) tampak = eem_volt persis, satuan sama (mV*100),
+ *   untuk hampir semua baris LUT yang sudah dicek di cluster0 & cluster1.
+ *
+ *   bit29 dan bit30 nyala cuma di baris-baris tertentu yang kebetulan pas di
+ *   titik "lompatan besar" -- diduga terkait transisi posdiv PLL, TAPI belum
+ *   dikonfirmasi. Jangan asumsikan cuma dua kemungkinan (0 atau salah satu
+ *   flag) tanpa verifikasi lebih lanjut di cluster lain.
+ *
+ * Field ini HANYA dibaca di cpu_lut_table (read-only). Belum ada jalur tulis
+ * ke field ini di modul ini.
+ */
+#define LUT_VOLT          GENMASK(28, 12)
+#define LUT_FLAG_A        BIT(29)
+#define LUT_FLAG_B        BIT(30)
+
 enum {
 	REG_FREQ_LUT_TABLE,
 	REG_FREQ_ENABLE,
@@ -879,37 +898,42 @@ static void dump_one_cpu(int cpu, char *buf, size_t *off, size_t bufsize,
 	*off += scnprintf(buf + *off, bufsize - *off,
 		"\n=== cpu%d domain (nr_opp=%d, cur_idx=%u) ===\n", cpu, c->nr_opp, cur_idx);
 	*off += scnprintf(buf + *off, bufsize - *off,
-		"[idx] sw_freq(RAM)   hw_freq(MMIO)   match?   raw32       bits[19:12]  bits[31:20]\n");
+		"[idx] sw_freq(RAM)   hw_freq(MMIO)   match?   lut_volt(raw/mV)      flagA flagB  raw32\n");
 	*off += scnprintf(buf + *off, bufsize - *off,
-		"      (bit ranges di atas cuma dugaan awal berdasarkan layout LUT cpufreq-hw yang umum;\n"
-		"       bandingkan pola angkanya manual sama mV di eem_cur_volt per index yang sama)\n");
+		"      lut_volt = bits[28:12] dari raw32. HIPOTESIS (belum 100%% pasti untuk\n"
+		"      semua cluster): nilainya match persis 'eem_volt' di /proc/eem_lite/eem_cur_volt\n"
+		"      pada baris freq yang sama -- WAJIB dicek manual dulu sebelum dipercaya.\n"
+		"      flagA/flagB = bit29/bit30, kelihatan cuma nyala di baris seputar transisi\n"
+		"      posdiv PLL -- artinya belum jelas, JANGAN diabaikan kalau mau nulis field ini.\n");
 
 	for (i = 0; i < c->nr_opp && i < LUT_MAX_ENTRIES; i++) {
 		unsigned int sw_freq = policy->freq_table[i].frequency;
 		u32 raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + (i * LUT_ROW_SIZE));
 		unsigned int hw_freq = FIELD_GET(LUT_FREQ, raw) * 1000;
-		/* Kandidat field non-freq, BELUM dikonfirmasi artinya apa.
-		 * Cuma buat inspeksi manual/korelasi, TIDAK dipakai buat nulis apapun. */
-		u32 mid_bits  = (raw >> 12) & 0xFF;   /* bits[19:12], 8 bit */
-		u32 high_bits = (raw >> 20) & 0xFFF;  /* bits[31:20], 12 bit sisa */
+		/* Kandidat field voltage, hasil korelasi manual vs eem_cur_volt.
+		 * MASIH BACA-SAJA -- tidak ada penulisan ke field ini di manapun. */
+		u32 lut_volt = FIELD_GET(LUT_VOLT, raw);
+		bool flag_a  = !!(raw & LUT_FLAG_A);
+		bool flag_b  = !!(raw & LUT_FLAG_B);
 		const char *mark = (i == cur_idx) ? "*" : " ";
 		const char *match = (sw_freq == hw_freq) ? "OK" : "MISMATCH";
 
 		*off += scnprintf(buf + *off, bufsize - *off,
-			"[%2d]%s %10u KHz  %10u KHz   %-8s 0x%08x  0x%02x (%3u)  0x%03x (%4u)\n",
-			i, mark, sw_freq, hw_freq, match, raw, mid_bits, mid_bits, high_bits, high_bits);
+			"[%2d]%s %10u KHz  %10u KHz   %-8s %6u (%4u.%02uV)  %-5s %-5s 0x%08x\n",
+			i, mark, sw_freq, hw_freq, match,
+			lut_volt, lut_volt / 100, lut_volt % 100,
+			flag_a ? "SET" : "-", flag_b ? "SET" : "-", raw);
 
-		if (*off >= bufsize - 128)
+		if (*off >= bufsize - 160)
 			return;
 	}
 	*off += scnprintf(buf + *off, bufsize - *off,
-		"\nCara pakai: sambil cat ini, cat juga /proc/eem_lite/eem_cur_volt.\n"
-		"Urutkan idx berdasar freq turun, taruh berdampingan sama mV di eem_cur_volt\n"
-		"buat cluster yang sama. Kalau salah satu kolom (mid_bits/high_bits) naik-turun\n"
-		"searah sama mV pas freq berubah, itu kandidat kuat field voltage/vsel.\n"
-		"Kalau semua idx nilainya SAMA PERSIS di kedua kolom itu, berarti bukan field\n"
-		"volt (kemungkinan reserved/fixed), dan voltage kemungkinan besar memang\n"
-		"di-drive dari luar register ini (firmware/EEM terpisah).\n");
+		"\nVerifikasi: 'cat' ini BERDAMPINGAN sama /proc/eem_lite/eem_cur_volt cluster yang\n"
+		"sama. Kalau kolom lut_volt di atas match eem_volt di semua baris (termasuk baris\n"
+		"yang freq-nya beda tapi eem_volt-nya kebetulan sama), berarti field ini valid buat\n"
+		"dijadikan target patch berikutnya. Kalau ada baris yang meleset SELAIN yang flagA/\n"
+		"flagB-nya SET, jangan lanjut nulis -- berarti hipotesis field-nya masih salah.\n");
+
 
 	cpufreq_cpu_put(policy);
 }
