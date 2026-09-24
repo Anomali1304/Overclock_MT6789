@@ -541,7 +541,7 @@ MODULE_PARM_DESC(cpu_b_target_khz, "Big cluster idx0 target freq in KHz (0=leave
  * voltage field (LUT_VOLT) of the same LUT word is raised in the same write.
  * The slope (raw volt per MHz) is taken from the cluster's own stock rows 1
  * and 3 (row 0 is skipped: on big it is clamped to the same volt as row 1). */
-#define CPU_VOLT_ABS_MAX_RAW  100000U	/* 1000 mV hard ceiling, raw = mV*100 */
+#define CPU_VOLT_ABS_MAX_RAW  102000U	/* 1000 mV hard ceiling, raw = mV*100 */
 
 static unsigned int cpu_volt_follow        = 1;
 static unsigned int cpu_volt_max_delta_raw = 3000;	/* 30 mV over stock idx0 */
