@@ -5,11 +5,13 @@ on:
     branches: [main, master]
     paths:
       - 'overclock_mt6789.c'
+      - 'test_volt_write.c'
       - 'Makefile'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'overclock_mt6789.c'
+      - 'test_volt_write.c'
       - 'Makefile'
       - '.github/workflows/build.yml'
   workflow_dispatch:
@@ -99,12 +101,16 @@ jobs:
       - name: Verify output
         working-directory: overclock_mt6789
         run: |
-          test -f overclock_mt6789.ko
-          ls -lh overclock_mt6789.ko
-          strings overclock_mt6789.ko | grep '^vermagic='
+          for ko in overclock_mt6789.ko test_volt_write.ko; do
+            test -f "$ko"
+            ls -lh "$ko"
+            strings "$ko" | grep '^vermagic='
+          done
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: overclock_mt6789.ko
-          path: overclock_mt6789/overclock_mt6789.ko
+          name: overclock_mt6789-and-test_volt_write
+          path: |
+            overclock_mt6789/overclock_mt6789.ko
+            overclock_mt6789/test_volt_write.ko
