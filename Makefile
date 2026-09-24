@@ -2,7 +2,12 @@ KDIR      ?= $(HOME)/OSS/common
 WORKSPACE ?= $(HOME)/OSS
 ARCH      := arm64
 
-obj-m := overclock_mt6789.o
+# Dipakai cuma sama 'make install-test' -- WAJIB di-override di command line,
+# misal: make install-test TARGET_CPU=0 TARGET_IDX=15
+TARGET_CPU ?= 0
+TARGET_IDX ?= $(error TARGET_IDX belum diset. Jalankan: make install-test TARGET_CPU=<cpu> TARGET_IDX=<idx non-aktif>)
+
+obj-m := overclock_mt6789.o test_volt_write.o
 
 CLANG_PREBUILT_BIN := $(shell \
   grep -E "^CLANG_PREBUILT_BIN=" $(WORKSPACE)/common/build.config.common \
@@ -47,9 +52,9 @@ all:
 	  EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
 	  modules
 	@if [ -x "$(CLANG_PATH)/llvm-strip" ]; then \
-		$(CLANG_PATH)/llvm-strip --strip-debug overclock_mt6789.ko; \
+		$(CLANG_PATH)/llvm-strip --strip-debug overclock_mt6789.ko test_volt_write.ko; \
 		echo "  [overclock_mt6789] Stripped debug info:"; \
-		ls -lh overclock_mt6789.ko; \
+		ls -lh overclock_mt6789.ko test_volt_write.ko; \
 	else \
 		echo "WARNING: llvm-strip not found at $(CLANG_PATH) — shipping unstripped .ko."; \
 	fi
@@ -65,6 +70,18 @@ install:
 
 uninstall:
 	adb shell su -c "rmmod overclock_mt6789 && echo OK"
+
+# test_volt_write TIDAK ikut 'make install' biasa dengan sengaja -- ini modul
+# yang beneran nulis ke hardware (walau cuma index non-aktif). Jalankan manual,
+# dan WAJIB isi TARGET_IDX ke index yang BUKAN cur_idx sebelum apply.
+install-test:
+	adb push test_volt_write.ko /data/local/tmp/
+	adb shell su -c "insmod /data/local/tmp/test_volt_write.ko test_target_cpu=$(TARGET_CPU) test_target_idx=$(TARGET_IDX)"
+	@sleep 1
+	adb shell su -c "cat /sys/module/test_volt_write/parameters/test_result"
+
+uninstall-test:
+	adb shell su -c "rmmod test_volt_write && echo OK"
 
 check-clang:
 	@echo "WORKSPACE    : $(WORKSPACE)"
