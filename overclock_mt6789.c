@@ -550,6 +550,64 @@ MODULE_PARM_DESC(cpu_volt_follow, "1=raise idx0 voltage together with freq (slop
 module_param(cpu_volt_max_delta_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_max_delta_raw, "Max voltage raise over stock idx0, raw (mV*100). Apply is refused if the computed raise is larger");
 
+/* EEM report mirror (/proc/eem_lite/eem_cur_volt).
+ *
+ * cpudvfs.ko's eem_cur_volt_proc_show() prints from 'eemsn_log': an ioremap of
+ * the 3rd MEM resource of the cpudvfs platform device (written by firmware, not a
+ * kernel RAM table). Layout, decoded from cpudvfs.ko of this device:
+ *   byte  6                : bit0 = firmware busy/updating
+ *   cluster c (0=LL, 1=B)  : block at 176*c
+ *     +12  : u16 freq_mhz[32]     (0 terminates)
+ *     +140 : u8  volt_step[32]    (printed as step * 625 = mV*100)
+ * Before writing, the row is read back and must equal either the stock value or
+ * what this module wrote last; anything else (other layout, firmware refreshed the
+ * table) => not touched. Purely a mirror of what we programmed into the LUT. */
+#define EEM_BUSY_OFF        6
+#define EEM_CLUSTER_STRIDE  176
+#define EEM_FREQ_OFF        12
+#define EEM_VOLT_OFF        140
+#define EEM_VOLT_STEP       625U
+
+static unsigned int cpu_eem_sync = 1;
+module_param(cpu_eem_sync, uint, 0644);
+MODULE_PARM_DESC(cpu_eem_sync, "1=mirror the idx0 freq/volt into the EEM report read by /proc/eem_lite/eem_cur_volt (verified write), 0=off");
+
+static void __iomem **sym_eemsn_log;
+static struct { bool set; unsigned int mhz, volt; } g_eem_last[2];
+
+static int eem_mirror_idx0(unsigned int cl, unsigned int orig_mhz, unsigned int orig_volt,
+			   unsigned int new_mhz, unsigned int new_volt)
+{
+	void __iomem *b, *fp, *vp;
+	unsigned int f, v;
+
+	if (!sym_eemsn_log || !(b = *sym_eemsn_log))
+		return -ENODEV;
+	if (new_volt % EEM_VOLT_STEP || new_volt / EEM_VOLT_STEP > 255U || new_mhz > 0xffffU)
+		return -ERANGE;
+	if (readb_relaxed(b + EEM_BUSY_OFF) & 1)
+		return -EBUSY;
+
+	fp = b + EEM_CLUSTER_STRIDE * cl + EEM_FREQ_OFF;
+	vp = b + EEM_CLUSTER_STRIDE * cl + EEM_VOLT_OFF;
+	f = readw_relaxed(fp);
+	v = readb_relaxed(vp) * EEM_VOLT_STEP;
+
+	if (!((f == orig_mhz && v == orig_volt) ||
+	      (g_eem_last[cl].set && f == g_eem_last[cl].mhz && v == g_eem_last[cl].volt))) {
+		pr_warn("oc_mt6789: eem cluster%u idx0 reads %uMHz/%u, expected %uMHz/%u — not touching EEM report\n",
+			cl, f, v, orig_mhz, orig_volt);
+		return -EINVAL;
+	}
+
+	writew_relaxed(new_mhz, fp);
+	writeb_relaxed(new_volt / EEM_VOLT_STEP, vp);
+	g_eem_last[cl].set  = true;
+	g_eem_last[cl].mhz  = new_mhz;
+	g_eem_last[cl].volt = new_volt;
+	return 0;
+}
+
 static char cpu_oc_result[256] = "not applied yet";
 static int cpu_oc_result_get(char *buf, const struct kernel_param *kp)
 {
@@ -665,9 +723,11 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 			int df  = (int)FIELD_GET(LUT_FREQ, r1) - (int)FIELD_GET(LUT_FREQ, r3);
 			int dvs = (int)FIELD_GET(LUT_VOLT, r1) - (int)FIELD_GET(LUT_VOLT, r3);
 
-			if (df > 0 && dvs > 0)
+			if (df > 0 && dvs > 0) {
 				dv = ((s64)dvs * (int)(use_khz / 1000 - *orig_khz / 1000)) / df;
-			else
+				/* stock table is in 625 (6.25 mV) steps; round up, never under-volt */
+				dv = ((dv + EEM_VOLT_STEP - 1) / EEM_VOLT_STEP) * EEM_VOLT_STEP;
+			} else
 				pr_warn("oc_mt6789: cpu%u: no usable volt slope in stock rows 1/3 — freq only\n",
 					rep_cpu);
 		} else {
@@ -705,6 +765,18 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	writel_relaxed(raw, lut + (0 * LUT_ROW_SIZE));
 	pr_info("oc_mt6789: cpu%u idx0 %u->%u KHz, volt raw %u->%u (/100=mV)\n",
 		rep_cpu, *orig_khz, use_khz, *orig_volt, new_volt);
+
+	if (cpu_eem_sync) {
+		int er = eem_mirror_idx0(rep_cpu == cpu_b_rep_cpu ? 1 : 0,
+					 *orig_khz / 1000, *orig_volt,
+					 use_khz / 1000, new_volt);
+		if (er)
+			pr_warn("oc_mt6789: cpu%u: EEM report not updated (%d) — LUT is unaffected\n",
+				rep_cpu, er);
+		else
+			pr_info("oc_mt6789: cpu%u: EEM report idx0 now %uMHz/%u\n",
+				rep_cpu, use_khz / 1000, new_volt);
+	}
 
 	down_write(&policy->rwsem);
 	policy->freq_table[0].frequency = use_khz;
@@ -1150,6 +1222,12 @@ static int __init oc_mt6789_init(void)
 		} else {
 			pr_warn("oc_mt6789: g_working_table not found via kallsyms (CONFIG_KALLSYMS_ALL off, ged.ko not loaded yet, or gpufreq v1 build) — GPU OC still applies at hardware level, but /sys/kernel/ged/hal/current_freqency will keep showing stock freq\n");
 		}
+
+		addr = sym_kallsyms_lookup_name("eemsn_log");
+		if (addr)
+			sym_eemsn_log = (void __iomem **)addr;
+		else
+			pr_warn("oc_mt6789: eemsn_log (cpudvfs) not found — eem_cur_volt mirror unavailable\n");
 
 		addr = sym_kallsyms_lookup_name("cpufreq_stats_free_table");
 		if (addr)
