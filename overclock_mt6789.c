@@ -476,7 +476,14 @@ MODULE_PARM_DESC(gpu_oc_apply, "Write 1 to apply gpu_target_khz/volt/vsram to OP
 
 #define LUT_MAX_ENTRIES   32U
 #define LUT_FREQ          GENMASK(11, 0)
+/* Candidate voltage field inferred from MT6789 LUT/EEM correlation.
+ * This is not proof of independent PMIC/MCUPM rail control. */
+#define LUT_VOLT          GENMASK(28, 12)
 #define LUT_ROW_SIZE      0x4
+#define CPU_VOLT_STEP_RAW       625U
+#define CPU_VOLT_DELTA_DEFAULT  20000U
+#define CPU_VOLT_ABS_DEFAULT    112000U
+#define CPU_VOLT_ABS_HARD_MAX   115000U
 
 enum {
 	REG_FREQ_LUT_TABLE,
@@ -508,6 +515,29 @@ MODULE_PARM_DESC(cpu_b_rep_cpu, "Representative CPU# for big cluster domain");
 
 static unsigned int cpu_ll_target_khz = 0;
 static unsigned int cpu_b_target_khz  = 0;
+
+/* Candidate cpufreq-hw LUT voltage; this is not a direct PMIC command. */
+static unsigned int cpu_volt_follow = 1;
+static unsigned int cpu_volt_max_delta_raw = CPU_VOLT_DELTA_DEFAULT;
+static unsigned int cpu_volt_abs_max_raw = CPU_VOLT_ABS_DEFAULT;
+static unsigned int cpu_ll_volt_raw;
+static unsigned int cpu_b_volt_raw;
+static unsigned int cpu_volt_reassert = 1;
+static unsigned int g_ll_applied_volt, g_b_applied_volt;
+static bool g_ll_voltage_active, g_b_voltage_active;
+
+module_param(cpu_volt_follow, uint, 0644);
+MODULE_PARM_DESC(cpu_volt_follow, "1=derive idx0 LUT voltage above stock; 0=frequency-only unless explicit voltage is set");
+module_param(cpu_volt_max_delta_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_volt_max_delta_raw, "Maximum LUT voltage increase over stock, raw mV*100; default +200mV");
+module_param(cpu_volt_abs_max_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_volt_abs_max_raw, "Final LUT voltage ceiling raw mV*100; hard-clamped to 115000 (1.15V)");
+module_param(cpu_ll_volt_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_ll_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+module_param(cpu_b_volt_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_b_volt_raw, "Explicit A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+module_param(cpu_volt_reassert, uint, 0644);
+MODULE_PARM_DESC(cpu_volt_reassert, "1=reassert LUT voltage if EEM/SVS overwrites it; 0=off");
 /* Requested CPU minimums are kept independently from cpufreq_policy.
  * Some MTK drivers rebuild policy limits and overwrite policy->min. */
 static unsigned int g_ll_requested_min_khz;
@@ -528,7 +558,14 @@ module_param_cb(cpu_oc_result, &cpu_oc_result_ops, NULL, 0444);
 MODULE_PARM_DESC(cpu_oc_result, "CPU OC status (read-only)");
 
 static unsigned int g_ll_orig_khz, g_b_orig_khz;
+static unsigned int g_ll_orig_volt, g_b_orig_volt;
 static bool         g_ll_have_orig, g_b_have_orig;
+
+static unsigned int cpu_volt_abs_max(void)
+{
+	return min_t(unsigned int, cpu_volt_abs_max_raw,
+		     CPU_VOLT_ABS_HARD_MAX);
+}
 
 #define QUIESCE_POLL_US     500U
 #define QUIESCE_TIMEOUT_US  50000U
@@ -577,12 +614,14 @@ static int patch_em_table(unsigned int rep_cpu, unsigned int use_khz)
 }
 
 static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
-			       unsigned int *orig_khz, bool *have_orig)
+			       unsigned int *orig_khz, unsigned int *orig_volt,
+			       bool *have_orig)
 {
 	struct cpufreq_policy *policy;
 	struct cpufreq_mtk_mirror *c;
 	struct freq_qos_request qos_req;
-	unsigned int use_khz, cap_khz, old_max;
+	unsigned int use_khz, cap_khz, old_max, new_volt, override_volt;
+	s64 dv = 0;
 	u32 raw;
 	int ret;
 
@@ -598,6 +637,8 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 
 	if (!*have_orig) {
 		*orig_khz = policy->freq_table[0].frequency;
+		raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
+		*orig_volt = FIELD_GET(LUT_VOLT, raw);
 		*have_orig = true;
 	}
 
@@ -615,6 +656,42 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	}
 
 
+	/* Calculate voltage before any MMIO write; reject out-of-limit requests. */
+	override_volt = (rep_cpu == cpu_ll_rep_cpu) ?
+			cpu_ll_volt_raw : cpu_b_volt_raw;
+	new_volt = *orig_volt;
+	if (use_khz > *orig_khz && (cpu_volt_follow || override_volt)) {
+		if (override_volt) {
+			new_volt = DIV_ROUND_UP(override_volt, CPU_VOLT_STEP_RAW) *
+				   CPU_VOLT_STEP_RAW;
+			if (new_volt < *orig_volt)
+				new_volt = *orig_volt;
+		} else if (c->nr_opp >= 4) {
+			u32 r1 = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + LUT_ROW_SIZE);
+			u32 r3 = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + 3 * LUT_ROW_SIZE);
+			int df = (int)FIELD_GET(LUT_FREQ, r1) - (int)FIELD_GET(LUT_FREQ, r3);
+			int dvs = (int)FIELD_GET(LUT_VOLT, r1) - (int)FIELD_GET(LUT_VOLT, r3);
+			if (df > 0 && dvs > 0) {
+				dv = ((s64)dvs * (int)(use_khz / 1000 - *orig_khz / 1000)) / df;
+				dv = (s64)(DIV_ROUND_UP_ULL((u64)max_t(s64, dv, 0),
+							    CPU_VOLT_STEP_RAW) * CPU_VOLT_STEP_RAW);
+				new_volt = *orig_volt + (unsigned int)dv;
+			} else {
+				pr_warn("oc_mt6789: cpu%u has no usable LUT voltage slope; frequency-only fallback\n", rep_cpu);
+			}
+		} else {
+			pr_warn("oc_mt6789: cpu%u has fewer than 4 OPPs; frequency-only fallback\n", rep_cpu);
+		}
+		if (new_volt - *orig_volt > cpu_volt_max_delta_raw ||
+		    new_volt > cpu_volt_abs_max()) {
+			pr_err("oc_mt6789: cpu%u voltage request %u raw refused (stock=%u, delta limit=%u, abs limit=%u)\n",
+			       rep_cpu, new_volt, *orig_volt, cpu_volt_max_delta_raw, cpu_volt_abs_max());
+			*have_orig = false;
+			cpufreq_cpu_put(policy);
+			return -EOVERFLOW;
+		}
+	}
+
 	old_max = policy->max;
 
 	ret = quiesce_off_idx0(policy, c, &qos_req);
@@ -623,9 +700,22 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		return ret;
 	}
 
-	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + (0 * LUT_ROW_SIZE));
-	raw = (raw & ~LUT_FREQ) | FIELD_PREP(LUT_FREQ, use_khz / 1000);
-	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE] + (0 * LUT_ROW_SIZE));
+	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
+	raw = (raw & ~(LUT_FREQ | LUT_VOLT)) |
+	      FIELD_PREP(LUT_FREQ, use_khz / 1000) |
+	      FIELD_PREP(LUT_VOLT, new_volt);
+	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE]);
+	if (rep_cpu == cpu_ll_rep_cpu) {
+		g_ll_applied_volt = new_volt;
+		g_ll_voltage_active = use_khz > *orig_khz && new_volt > *orig_volt;
+	} else {
+		g_b_applied_volt = new_volt;
+		g_b_voltage_active = use_khz > *orig_khz && new_volt > *orig_volt;
+	}
+	pr_info("oc_mt6789: cpu%u idx0 LUT freq=%u KHz voltage raw %u->%u%s\n",
+		rep_cpu, use_khz, *orig_volt, new_volt,
+		(use_khz > *orig_khz && new_volt > *orig_volt) ?
+		" (candidate voltage raised)" : "");
 
 	down_write(&policy->rwsem);
 	policy->freq_table[0].frequency = use_khz;
@@ -665,12 +755,18 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 
 	if (cpu_ll_target_khz || g_ll_have_orig)
 		ret_ll = patch_cluster_idx0(cpu_ll_rep_cpu, cpu_ll_target_khz,
-					     &g_ll_orig_khz, &g_ll_have_orig);
+					     &g_ll_orig_khz, &g_ll_orig_volt,
+					     &g_ll_have_orig);
 	if (cpu_b_target_khz || g_b_have_orig)
 		ret_b = patch_cluster_idx0(cpu_b_rep_cpu, cpu_b_target_khz,
-					    &g_b_orig_khz, &g_b_have_orig);
+					    &g_b_orig_khz, &g_b_orig_volt,
+					    &g_b_have_orig);
 
-	if (ret_ll == -ERANGE || ret_b == -ERANGE)
+	if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW)
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "FAIL: LUT voltage exceeded delta/absolute ceiling (ll=%d b=%d, delta=%u, abs=%u)",
+			 ret_ll, ret_b, cpu_volt_max_delta_raw, cpu_volt_abs_max());
+	else if (ret_ll == -ERANGE || ret_b == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: target exceeds OC limit (ll=%u b=%u KHz)",
 			 cpu_ll_target_khz, cpu_b_target_khz);
@@ -787,6 +883,34 @@ MODULE_PARM_DESC(cpu_b_min_khz,
 
 static struct task_struct *g_guardian_thread;
 
+static void guardian_reassert_voltage(struct cpufreq_policy *policy,
+				      unsigned int rep_cpu)
+{
+	struct cpufreq_mtk_mirror *c = policy->driver_data;
+	unsigned int want, now;
+	u32 raw;
+
+	if (!cpu_volt_reassert || !c)
+		return;
+	if (rep_cpu == cpu_ll_rep_cpu) {
+		if (!g_ll_voltage_active)
+			return;
+		want = g_ll_applied_volt;
+	} else {
+		if (!g_b_voltage_active)
+			return;
+		want = g_b_applied_volt;
+	}
+	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
+	now = FIELD_GET(LUT_VOLT, raw);
+	if (now == want)
+		return;
+	raw = (raw & ~LUT_VOLT) | FIELD_PREP(LUT_VOLT, want);
+	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE]);
+	pr_warn_ratelimited("oc_mt6789: cpu%u idx0 LUT voltage changed %u->%u; reasserted %u (does not prove rail voltage)\n",
+			    rep_cpu, now, want, want);
+}
+
 static void guardian_check_one(unsigned int rep_cpu, unsigned int target_khz,
 			       unsigned int orig_khz, bool have_orig,
 			       unsigned int requested_min)
@@ -822,6 +946,7 @@ static void guardian_check_one(unsigned int rep_cpu, unsigned int target_khz,
 	if (policy->min > policy->max)
 		policy->min = policy->max;
 
+	guardian_reassert_voltage(policy, rep_cpu);
 	up_write(&policy->rwsem);
 	cpufreq_cpu_put(policy);
 }
@@ -879,17 +1004,19 @@ static void dump_one_cpu(int cpu, char *buf, size_t *off, size_t bufsize,
 	*off += scnprintf(buf + *off, bufsize - *off,
 		"\n=== cpu%d domain (nr_opp=%d, cur_idx=%u) ===\n", cpu, c->nr_opp, cur_idx);
 	*off += scnprintf(buf + *off, bufsize - *off,
-		"[idx] sw_freq(RAM)   hw_freq(MMIO)   match?\n");
+		"[idx] sw_freq(RAM)   hw_freq(MMIO)   LUT_volt(raw)   match?\n");
 
 	for (i = 0; i < c->nr_opp && i < LUT_MAX_ENTRIES; i++) {
 		unsigned int sw_freq = policy->freq_table[i].frequency;
 		u32 raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + (i * LUT_ROW_SIZE));
 		unsigned int hw_freq = FIELD_GET(LUT_FREQ, raw) * 1000;
+		unsigned int hw_volt = FIELD_GET(LUT_VOLT, raw);
 		const char *mark = (i == cur_idx) ? "*" : " ";
 		const char *match = (sw_freq == hw_freq) ? "OK" : "MISMATCH";
 
 		*off += scnprintf(buf + *off, bufsize - *off,
-			"[%2d]%s %10u KHz  %10u KHz   %s\n", i, mark, sw_freq, hw_freq, match);
+			"[%2d]%s %10u KHz  %10u KHz  %10u   %s\n",
+			i, mark, sw_freq, hw_freq, hw_volt, match);
 
 		if (*off >= bufsize - 128)
 			return;
@@ -1107,9 +1234,11 @@ static void __exit oc_mt6789_exit(void)
 	mutex_lock(&oc_lock);
 	gpu_restore_working_table();
 	if (g_ll_have_orig)
-		patch_cluster_idx0(cpu_ll_rep_cpu, 0, &g_ll_orig_khz, &g_ll_have_orig);
+		patch_cluster_idx0(cpu_ll_rep_cpu, 0, &g_ll_orig_khz,
+				   &g_ll_orig_volt, &g_ll_have_orig);
 	if (g_b_have_orig)
-		patch_cluster_idx0(cpu_b_rep_cpu, 0, &g_b_orig_khz, &g_b_have_orig);
+		patch_cluster_idx0(cpu_b_rep_cpu, 0, &g_b_orig_khz,
+				   &g_b_orig_volt, &g_b_have_orig);
 	mutex_unlock(&oc_lock);
 
 	if (g_apmixed_va) {
