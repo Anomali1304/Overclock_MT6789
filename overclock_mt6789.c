@@ -1118,12 +1118,10 @@ MODULE_PARM_DESC(cpu_stats_refresh, "Write 1=little / 2=big to rebuild that clus
 
 
 /* -------------------------------------------------------------------------
- * Samsung SKI-compatible GPU sysfs nodes, adapted from riza220201's
- * rs4_gpu_ski.c for this existing loadable OC module.
+ * GPU SKI-compatible sysfs interface.
  *
- * GPU data/limits use the existing MTK gpufreq/GED helpers. The governor
- * selector remains the Mali driver's native power_policy sysfs node; these
- * SKI governor labels are informational only.
+ * GPU telemetry and frequency limits use MTK gpufreq/GED helper symbols.
+ * Governor policy remains controlled by Mali's native power_policy interface.
  * ------------------------------------------------------------------------- */
 
 typedef unsigned int (*fn_ski_cur_t)(enum gpufreq_target);
