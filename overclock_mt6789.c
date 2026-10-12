@@ -19,6 +19,7 @@
 #include <linux/energy_model.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
+#include <linux/platform_device.h>
 
 static atomic_t oc_mt6789_suspended = ATOMIC_INIT(0);
 
@@ -1218,22 +1219,123 @@ static __nocfi int ski_freq_to_idx(unsigned int khz)
 	return -EINVAL;
 }
 
+/*
+ * Match the Mali R32P1 policy API in android_kernel_xiaomi_rock:
+ * kbase_pm_get_policy() returns a policy whose first field is its name;
+ * kbase_pm_list_policies() returns the policies accepted by power_policy.
+ * dev_get_drvdata() on the Mali platform device returns struct kbase_device.
+ */
+struct ski_mali_pm_policy {
+	char *name;
+};
+
+typedef const struct ski_mali_pm_policy *(*fn_ski_mali_get_policy_t)(void *);
+typedef int (*fn_ski_mali_list_policies_t)(
+	void *, const struct ski_mali_pm_policy * const **);
+
+static fn_ski_mali_get_policy_t ski_mali_get_policy;
+static fn_ski_mali_list_policies_t ski_mali_list_policies;
+
+static __nocfi struct device *ski_mali_get_device(void)
+{
+	return bus_find_device_by_name(&platform_bus_type, NULL, "13000000.mali");
+}
+
+static __nocfi int ski_mali_resolve_policy_api(void)
+{
+	unsigned long addr;
+
+	if (!ski_mali_get_policy) {
+		addr = resolve_ksym("kbase_pm_get_policy");
+		if (addr)
+			ski_mali_get_policy = (fn_ski_mali_get_policy_t)addr;
+	}
+	if (!ski_mali_list_policies) {
+		addr = resolve_ksym("kbase_pm_list_policies");
+		if (addr)
+			ski_mali_list_policies = (fn_ski_mali_list_policies_t)addr;
+	}
+	return (ski_mali_get_policy && ski_mali_list_policies) ? 0 : -ENODEV;
+}
+
+static __nocfi int ski_mali_active_policy(char *name, size_t name_size)
+{
+	struct device *dev;
+	const struct ski_mali_pm_policy *policy;
+	void *kbdev;
+
+	if (ski_mali_resolve_policy_api())
+		return -ENODEV;
+
+	dev = ski_mali_get_device();
+	if (!dev)
+		return -ENODEV;
+
+	kbdev = dev_get_drvdata(dev);
+	if (!kbdev) {
+		put_device(dev);
+		return -ENODEV;
+	}
+
+	policy = ski_mali_get_policy(kbdev);
+	if (!policy || !policy->name) {
+		put_device(dev);
+		return -ENODATA;
+	}
+
+	strscpy(name, policy->name, name_size);
+	put_device(dev);
+	return 0;
+}
+
 static __nocfi ssize_t gpu_available_governor_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	/* Supported policies observed on the MT6789 Mali driver. */
-	return scnprintf(buf, PAGE_SIZE, "coarse_demand always_on\n");
+	struct device *dev;
+	const struct ski_mali_pm_policy * const *policies = NULL;
+	void *kbdev;
+	int count, i;
+	ssize_t len = 0;
+
+	if (ski_mali_resolve_policy_api())
+		return -EAGAIN;
+
+	dev = ski_mali_get_device();
+	if (!dev)
+		return -ENODEV;
+	kbdev = dev_get_drvdata(dev);
+	if (!kbdev) {
+		put_device(dev);
+		return -ENODEV;
+	}
+
+	count = ski_mali_list_policies(kbdev, &policies);
+	if (count <= 0 || !policies) {
+		put_device(dev);
+		return -ENODATA;
+	}
+
+	for (i = 0; i < count && len < PAGE_SIZE - 2; i++) {
+		if (!policies[i] || !policies[i]->name)
+			continue;
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%s%s",
+				 i ? " " : "", policies[i]->name);
+	}
+	len += scnprintf(buf + len, PAGE_SIZE - len, "\n");
+	put_device(dev);
+	return len;
 }
 
 static __nocfi ssize_t gpu_governor_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	/*
-	 * TODO: connect this to the active policy in the matching Mali kbase
-	 * driver. Do not claim "Default"; this interface must remain present.
-	 * The current device's native power_policy reports coarse_demand.
-	 */
-	return scnprintf(buf, PAGE_SIZE, "coarse_demand\n");
+	char name[64];
+	int ret;
+
+	ret = ski_mali_active_policy(name, sizeof(name));
+	if (ret)
+		return -EAGAIN;
+	return scnprintf(buf, PAGE_SIZE, "%s\n", name);
 }
 
 static __nocfi ssize_t gpu_model_show(struct kobject *kobj,
