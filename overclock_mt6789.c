@@ -1232,9 +1232,12 @@ struct ski_mali_pm_policy {
 typedef const struct ski_mali_pm_policy *(*fn_ski_mali_get_policy_t)(void *);
 typedef int (*fn_ski_mali_list_policies_t)(
 	void *, const struct ski_mali_pm_policy * const **);
+typedef void (*fn_ski_mali_set_policy_t)(
+	void *, const struct ski_mali_pm_policy *);
 
 static fn_ski_mali_get_policy_t ski_mali_get_policy;
 static fn_ski_mali_list_policies_t ski_mali_list_policies;
+static fn_ski_mali_set_policy_t ski_mali_set_policy;
 
 static __nocfi struct device *ski_mali_get_device(void)
 {
@@ -1255,7 +1258,13 @@ static __nocfi int ski_mali_resolve_policy_api(void)
 		if (addr)
 			ski_mali_list_policies = (fn_ski_mali_list_policies_t)addr;
 	}
-	return (ski_mali_get_policy && ski_mali_list_policies) ? 0 : -ENODEV;
+	if (!ski_mali_set_policy) {
+		addr = resolve_ksym("kbase_pm_set_policy");
+		if (addr)
+			ski_mali_set_policy = (fn_ski_mali_set_policy_t)addr;
+	}
+	return (ski_mali_get_policy && ski_mali_list_policies &&
+		ski_mali_set_policy) ? 0 : -ENODEV;
 }
 
 static __nocfi int ski_mali_active_policy(char *name, size_t name_size)
@@ -1336,6 +1345,48 @@ static __nocfi ssize_t gpu_governor_show(struct kobject *kobj,
 	if (ret)
 		return -EAGAIN;
 	return scnprintf(buf, PAGE_SIZE, "%s\n", name);
+}
+
+static __nocfi ssize_t gpu_governor_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	const struct ski_mali_pm_policy * const *policies = NULL;
+	struct device *dev;
+	void *kbdev;
+	int n, i;
+	ssize_t ret = -EINVAL;
+
+	if (ski_mali_resolve_policy_api())
+		return -EAGAIN;
+
+	dev = ski_mali_get_device();
+	if (!dev)
+		return -ENODEV;
+	kbdev = dev_get_drvdata(dev);
+	if (!kbdev) {
+		put_device(dev);
+		return -ENODEV;
+	}
+
+	n = ski_mali_list_policies(kbdev, &policies);
+	if (n <= 0 || !policies) {
+		put_device(dev);
+		return -ENODATA;
+	}
+
+	for (i = 0; i < n; i++) {
+		if (!policies[i] || !policies[i]->name)
+			continue;
+		if (sysfs_streq(policies[i]->name, buf)) {
+			/* Use Mali's own policy transition routine, not a shadow value. */
+			ski_mali_set_policy(kbdev, policies[i]);
+			ret = count;
+			break;
+		}
+	}
+
+	put_device(dev);
+	return ret;
 }
 
 static __nocfi ssize_t gpu_model_show(struct kobject *kobj,
@@ -1461,7 +1512,7 @@ static struct kobj_attribute ski_gpu_attrs[] = {
 	__ATTR_RO(gpu_busy),
 	__ATTR_RO(gpu_clock),
 	__ATTR_RO(gpu_freq_table),
-	__ATTR_RO(gpu_governor),
+	__ATTR(gpu_governor, 0644, gpu_governor_show, gpu_governor_store),
 	__ATTR(gpu_max_clock, 0644, gpu_max_clock_show, gpu_max_clock_store),
 	__ATTR(gpu_min_clock, 0644, gpu_min_clock_show, gpu_min_clock_store),
 	__ATTR_RO(gpu_model),
