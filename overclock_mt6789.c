@@ -17,6 +17,8 @@
 #include <linux/pm_qos.h>
 #include <linux/kthread.h>
 #include <linux/energy_model.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 
 static atomic_t oc_mt6789_suspended = ATOMIC_INIT(0);
 
@@ -1113,6 +1115,288 @@ static int cpu_stats_refresh_dummy = 0;
 module_param_cb(cpu_stats_refresh, &cpu_stats_refresh_ops, &cpu_stats_refresh_dummy, 0644);
 MODULE_PARM_DESC(cpu_stats_refresh, "Write 1=little / 2=big to rebuild that cluster's time_in_state table after a CPU OC apply");
 
+
+
+/* -------------------------------------------------------------------------
+ * GPU SKI-compatible sysfs interface.
+ *
+ * GPU telemetry and frequency limits use MTK gpufreq/GED helper symbols.
+ * Governor policy remains controlled by Mali's native power_policy interface.
+ * ------------------------------------------------------------------------- */
+
+typedef unsigned int (*fn_ski_cur_t)(enum gpufreq_target);
+typedef bool (*fn_ski_loading_t)(unsigned int *);
+typedef bool (*fn_ski_limit_t)(unsigned int);
+typedef bool (*fn_ski_bottom_t)(unsigned long *);
+typedef bool (*fn_ski_ceiling_t)(int *);
+
+static fn_ski_cur_t ski_cur_freq;
+static fn_ski_cur_t ski_cur_volt;
+static fn_ski_loading_t ski_get_loading;
+static fn_ski_limit_t ski_custom_boost;
+static fn_ski_limit_t ski_custom_upbound;
+static fn_ski_bottom_t ski_get_bottom;
+static fn_ski_ceiling_t ski_get_ceiling;
+static struct kobject *ski_kobj;
+static unsigned int ski_custom_max_khz;
+static unsigned int ski_custom_min_khz;
+
+static __nocfi bool ski_resolve_helpers(void)
+{
+	unsigned long addr;
+
+	if (!sym_gpufreq_get_working_table) {
+		addr = resolve_ksym("gpufreq_get_working_table");
+		if (addr)
+			sym_gpufreq_get_working_table = (fn_get_wt_t)addr;
+	}
+	if (!sym_gpufreq_get_opp_num) {
+		addr = resolve_ksym("gpufreq_get_opp_num");
+		if (addr)
+			sym_gpufreq_get_opp_num = (fn_get_opp_num_t)addr;
+	}
+	if (!ski_cur_freq) {
+		addr = resolve_ksym("gpufreq_get_cur_freq");
+		if (addr)
+			ski_cur_freq = (fn_ski_cur_t)addr;
+	}
+	if (!ski_cur_volt) {
+		addr = resolve_ksym("gpufreq_get_cur_volt");
+		if (addr)
+			ski_cur_volt = (fn_ski_cur_t)addr;
+	}
+	if (!ski_get_loading) {
+		addr = resolve_ksym("mtk_get_gpu_loading");
+		if (addr)
+			ski_get_loading = (fn_ski_loading_t)addr;
+	}
+	if (!ski_custom_boost) {
+		addr = resolve_ksym("mtk_custom_boost_gpu_freq");
+		if (addr)
+			ski_custom_boost = (fn_ski_limit_t)addr;
+	}
+	if (!ski_custom_upbound) {
+		addr = resolve_ksym("mtk_custom_upbound_gpu_freq");
+		if (addr)
+			ski_custom_upbound = (fn_ski_limit_t)addr;
+	}
+	if (!ski_get_bottom) {
+		addr = resolve_ksym("mtk_get_gpu_bottom_freq");
+		if (addr)
+			ski_get_bottom = (fn_ski_bottom_t)addr;
+	}
+	if (!ski_get_ceiling) {
+		addr = resolve_ksym("mtk_get_gpu_ceiling_index");
+		if (addr)
+			ski_get_ceiling = (fn_ski_ceiling_t)addr;
+	}
+
+	return sym_gpufreq_get_working_table && sym_gpufreq_get_opp_num &&
+	       ski_cur_freq && ski_cur_volt && ski_get_loading &&
+	       ski_custom_boost && ski_custom_upbound && ski_get_bottom &&
+	       ski_get_ceiling;
+}
+
+static __nocfi const struct gpufreq_opp_info *ski_gpu_table(int *count)
+{
+	const struct gpufreq_opp_info *table;
+
+	if (!ski_resolve_helpers())
+		return NULL;
+	*count = sym_gpufreq_get_opp_num(TARGET_GPU);
+	if (*count <= 0 || *count > GPU_OPP_MAX)
+		return NULL;
+	table = sym_gpufreq_get_working_table(TARGET_GPU);
+	return table;
+}
+
+static __nocfi int ski_freq_to_idx(unsigned int khz)
+{
+	const struct gpufreq_opp_info *table;
+	int count = 0, i;
+
+	table = ski_gpu_table(&count);
+	if (!table)
+		return -EAGAIN;
+	for (i = 0; i < count; i++)
+		if (table[i].freq == khz)
+			return i;
+	return -EINVAL;
+}
+
+static __nocfi ssize_t gpu_available_governor_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "coarse_demand always_on\n");
+}
+
+static __nocfi ssize_t gpu_governor_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	/* The active governor is controlled by Mali power_policy, not this node. */
+	return scnprintf(buf, PAGE_SIZE, "Default\n");
+}
+
+static __nocfi ssize_t gpu_model_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "Mali-G57 MC2\n");
+}
+
+static __nocfi ssize_t gpu_busy_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	unsigned int loading = 0;
+
+	if (!ski_resolve_helpers())
+		return -EAGAIN;
+	ski_get_loading(&loading);
+	return scnprintf(buf, PAGE_SIZE, "%u %%\n", loading);
+}
+
+static __nocfi ssize_t gpu_clock_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	unsigned int khz;
+
+	if (!ski_resolve_helpers())
+		return -EAGAIN;
+	khz = ski_cur_volt(TARGET_GPU) ? ski_cur_freq(TARGET_GPU) : 0;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", khz);
+}
+
+static __nocfi ssize_t gpu_freq_table_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	const struct gpufreq_opp_info *table;
+	ssize_t len = 0;
+	int count = 0, i;
+
+	table = ski_gpu_table(&count);
+	if (!table)
+		return -EAGAIN;
+	for (i = 0; i < count && len < PAGE_SIZE - 16; i++)
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%u ",
+				 table[i].freq);
+	len += scnprintf(buf + len, PAGE_SIZE - len, "\n");
+	return len;
+}
+
+static __nocfi ssize_t gpu_max_clock_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	const struct gpufreq_opp_info *table;
+	unsigned int khz;
+	int count = 0, idx = 0;
+
+	table = ski_gpu_table(&count);
+	if (!table)
+		return -EAGAIN;
+	if (!ski_get_ceiling(&idx) || idx < 0 || idx >= count)
+		idx = 0;
+	khz = table[idx].freq;
+	if (ski_custom_max_khz && ski_custom_max_khz < khz)
+		khz = ski_custom_max_khz;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", khz);
+}
+
+static __nocfi ssize_t gpu_max_clock_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	unsigned int khz;
+	int idx;
+
+	if (kstrtouint(buf, 0, &khz) || !khz)
+		return -EINVAL;
+	if (!ski_resolve_helpers())
+		return -EAGAIN;
+	idx = ski_freq_to_idx(khz);
+	if (idx < 0)
+		return idx;
+	if (!ski_custom_upbound(idx))
+		return -EIO;
+	ski_custom_max_khz = idx ? khz : 0;
+	return count;
+}
+
+static __nocfi ssize_t gpu_min_clock_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	unsigned long khz = 0;
+
+	if (!ski_resolve_helpers())
+		return -EAGAIN;
+	if (!ski_get_bottom(&khz))
+		return -EIO;
+	if (ski_custom_min_khz > khz)
+		khz = ski_custom_min_khz;
+	return scnprintf(buf, PAGE_SIZE, "%lu\n", khz);
+}
+
+static __nocfi ssize_t gpu_min_clock_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	unsigned int khz;
+	int idx, n;
+
+	if (kstrtouint(buf, 0, &khz) || !khz)
+		return -EINVAL;
+	if (!ski_resolve_helpers())
+		return -EAGAIN;
+	idx = ski_freq_to_idx(khz);
+	if (idx < 0)
+		return idx;
+	if (!ski_custom_boost(idx))
+		return -EIO;
+	n = sym_gpufreq_get_opp_num(TARGET_GPU);
+	ski_custom_min_khz = (idx == n - 1) ? 0 : khz;
+	return count;
+}
+
+static struct kobj_attribute ski_gpu_attrs[] = {
+	__ATTR_RO(gpu_available_governor),
+	__ATTR_RO(gpu_busy),
+	__ATTR_RO(gpu_clock),
+	__ATTR_RO(gpu_freq_table),
+	__ATTR_RO(gpu_governor),
+	__ATTR(gpu_max_clock, 0644, gpu_max_clock_show, gpu_max_clock_store),
+	__ATTR(gpu_min_clock, 0644, gpu_min_clock_show, gpu_min_clock_store),
+	__ATTR_RO(gpu_model),
+};
+
+static struct attribute *ski_gpu_attr_ptrs[ARRAY_SIZE(ski_gpu_attrs) + 1];
+
+static const struct attribute_group ski_gpu_attr_group = {
+	.attrs = ski_gpu_attr_ptrs,
+};
+
+static int oc_ski_init(void)
+{
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(ski_gpu_attrs); i++)
+		ski_gpu_attr_ptrs[i] = &ski_gpu_attrs[i].attr;
+
+	ski_kobj = kobject_create_and_add("gpu", kernel_kobj);
+	if (!ski_kobj)
+		return -ENOMEM;
+	ret = sysfs_create_group(ski_kobj, &ski_gpu_attr_group);
+	if (ret) {
+		kobject_put(ski_kobj);
+		ski_kobj = NULL;
+	}
+	return ret;
+}
+
+static void oc_ski_exit(void)
+{
+	if (ski_kobj) {
+		sysfs_remove_group(ski_kobj, &ski_gpu_attr_group);
+		kobject_put(ski_kobj);
+		ski_kobj = NULL;
+	}
+}
+
 static int __init oc_mt6789_init(void)
 {
 	unsigned long addr;
@@ -1203,12 +1487,17 @@ static int __init oc_mt6789_init(void)
 		g_guardian_thread = NULL;
 	}
 
+	ret = oc_ski_init();
+	if (ret)
+		pr_warn("oc_mt6789: SKI sysfs setup failed (%d)\n", ret);
+
 	pr_info("oc_mt6789: ready — sysfs at /sys/module/overclock_mt6789/parameters/\n");
 	return 0;
 }
 
 static void __exit oc_mt6789_exit(void)
 {
+	oc_ski_exit();
 	pr_info("overclock_mt6789: unloading\n");
 
 	unregister_pm_notifier(&oc_mt6789_pm_nb);
