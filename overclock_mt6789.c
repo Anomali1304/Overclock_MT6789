@@ -1131,7 +1131,6 @@ typedef bool (*fn_ski_bottom_t)(unsigned long *);
 typedef bool (*fn_ski_ceiling_t)(int *);
 
 static fn_ski_cur_t ski_cur_freq;
-static fn_ski_cur_t ski_cur_volt;
 static fn_ski_loading_t ski_get_loading;
 static fn_ski_limit_t ski_custom_boost;
 static fn_ski_limit_t ski_custom_upbound;
@@ -1160,11 +1159,6 @@ static __nocfi bool ski_resolve_helpers(void)
 		if (addr)
 			ski_cur_freq = (fn_ski_cur_t)addr;
 	}
-	if (!ski_cur_volt) {
-		addr = resolve_ksym("gpufreq_get_cur_volt");
-		if (addr)
-			ski_cur_volt = (fn_ski_cur_t)addr;
-	}
 	if (!ski_get_loading) {
 		addr = resolve_ksym("mtk_get_gpu_loading");
 		if (addr)
@@ -1192,7 +1186,7 @@ static __nocfi bool ski_resolve_helpers(void)
 	}
 
 	return sym_gpufreq_get_working_table && sym_gpufreq_get_opp_num &&
-	       ski_cur_freq && ski_cur_volt && ski_get_loading &&
+	       ski_cur_freq && ski_get_loading &&
 	       ski_custom_boost && ski_custom_upbound && ski_get_bottom &&
 	       ski_get_ceiling;
 }
@@ -1261,7 +1255,8 @@ static __nocfi ssize_t gpu_clock_show(struct kobject *kobj,
 
 	if (!ski_resolve_helpers())
 		return -EAGAIN;
-	khz = ski_cur_volt(TARGET_GPU) ? ski_cur_freq(TARGET_GPU) : 0;
+	/* Frequency is independently readable; voltage may be zero while the GPU is idle. */
+	khz = ski_cur_freq(TARGET_GPU);
 	return scnprintf(buf, PAGE_SIZE, "%u\n", khz);
 }
 
