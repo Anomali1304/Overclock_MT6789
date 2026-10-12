@@ -1218,6 +1218,24 @@ static __nocfi int ski_freq_to_idx(unsigned int khz)
 	return -EINVAL;
 }
 
+static __nocfi ssize_t gpu_available_governor_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	/* Supported policies observed on the MT6789 Mali driver. */
+	return scnprintf(buf, PAGE_SIZE, "coarse_demand always_on\n");
+}
+
+static __nocfi ssize_t gpu_governor_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	/*
+	 * TODO: connect this to the active policy in the matching Mali kbase
+	 * driver. Do not claim "Default"; this interface must remain present.
+	 * The current device's native power_policy reports coarse_demand.
+	 */
+	return scnprintf(buf, PAGE_SIZE, "coarse_demand\n");
+}
+
 static __nocfi ssize_t gpu_model_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
@@ -1336,9 +1354,12 @@ static __nocfi ssize_t gpu_min_clock_store(struct kobject *kobj,
 }
 
 static struct kobj_attribute ski_gpu_attrs[] = {
+	__ATTR_RO(gpu_available_governor),
+
 	__ATTR_RO(gpu_busy),
 	__ATTR_RO(gpu_clock),
 	__ATTR_RO(gpu_freq_table),
+	__ATTR_RO(gpu_governor),
 	__ATTR(gpu_max_clock, 0644, gpu_max_clock_show, gpu_max_clock_store),
 	__ATTR(gpu_min_clock, 0644, gpu_min_clock_show, gpu_min_clock_store),
 	__ATTR_RO(gpu_model),
