@@ -506,11 +506,11 @@ struct cpufreq_mtk_mirror {
 };
 
 static unsigned int cpu_ll_rep_cpu = 0;
-static unsigned int cpu_b_rep_cpu  = 6;
+static unsigned int cpu_b_rep_cpu  = 4;
 module_param(cpu_ll_rep_cpu, uint, 0444);
 module_param(cpu_b_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_ll_rep_cpu, "Representative CPU# for little cluster domain");
-MODULE_PARM_DESC(cpu_b_rep_cpu, "Representative CPU# for big cluster domain");
+MODULE_PARM_DESC(cpu_b_rep_cpu, "Representative CPU# for second CPU frequency domain");
 
 #define MAX_OC_PERCENT_OVER_STOCK  60
 
