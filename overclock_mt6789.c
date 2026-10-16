@@ -608,7 +608,7 @@ static int discover_cpu_policy_representatives(void)
 	return 0;
 }
 
-#define MAX_OC_PERCENT_OVER_STOCK  60
+#define MAX_OC_PERCENT_OVER_STOCK  70
 
 #define MAX_OC_ABSOLUTE_KHZ  2600000U
 
