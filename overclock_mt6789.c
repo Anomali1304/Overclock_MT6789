@@ -511,8 +511,18 @@ struct cpufreq_mtk_mirror {
  * two CPU targets (little/big), so choose the lowest- and highest-frequency
  * policies when the platform exposes more than two policies.
  */
+#define MAX_CPU_POLICIES 8
+static unsigned int cpu_policy_reps[MAX_CPU_POLICIES];
+static unsigned int cpu_policy_count;
+static unsigned int cpu_policy_orig_khz[MAX_CPU_POLICIES];
+static unsigned int cpu_policy_orig_volt[MAX_CPU_POLICIES];
+static bool cpu_policy_have_orig[MAX_CPU_POLICIES];
+static unsigned int cpu_policy_targets[MAX_CPU_POLICIES];
 static unsigned int cpu_ll_rep_cpu = UINT_MAX;
 static unsigned int cpu_b_rep_cpu  = UINT_MAX;
+static char cpu_policy_targets_khz[128];
+module_param_string(cpu_policy_targets_khz, cpu_policy_targets_khz, sizeof(cpu_policy_targets_khz), 0644);
+MODULE_PARM_DESC(cpu_policy_targets_khz, "Comma-separated target KHz per detected policy in representative-CPU order; 0 restores stock");
 module_param(cpu_ll_rep_cpu, uint, 0444);
 module_param(cpu_b_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
@@ -535,6 +545,8 @@ static int discover_cpu_policy_representatives(void)
 			continue;
 		cpumask_or(&seen, &seen, policy->related_cpus);
 		rep = cpumask_first(&policy->related_cpus);
+		if (rep < nr_cpu_ids && policy->freq_table && cpu_policy_count < MAX_CPU_POLICIES)
+			cpu_policy_reps[cpu_policy_count++] = rep;
 		if (rep >= nr_cpu_ids || !policy->freq_table) {
 			cpufreq_cpu_put(policy);
 			continue;
@@ -558,6 +570,8 @@ static int discover_cpu_policy_representatives(void)
 		       low_rep, high_rep);
 		return -ENODEV;
 	}
+	if (!cpu_policy_count)
+		return -ENODEV;
 	cpu_ll_rep_cpu = low_rep;
 	cpu_b_rep_cpu = high_rep;
 	pr_info("oc_mt6789: auto CPU policy reps: low-policy CPU%u (max=%u KHz), high-policy CPU%u (max=%u KHz)\n",
@@ -713,8 +727,12 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 
 
 	/* Calculate voltage before any MMIO write; reject out-of-limit requests. */
-	override_volt = (rep_cpu == cpu_ll_rep_cpu) ?
-			cpu_ll_volt_raw : cpu_b_volt_raw;
+	if (cpu_policy_targets_khz[0] && rep_cpu != cpu_ll_rep_cpu &&
+		    rep_cpu != cpu_b_rep_cpu)
+		override_volt = 0; /* Intermediate policies derive voltage from their own LUT slope. */
+	else
+		override_volt = (rep_cpu == cpu_ll_rep_cpu) ?
+				cpu_ll_volt_raw : cpu_b_volt_raw;
 	new_volt = *orig_volt;
 	if (use_khz > *orig_khz && (cpu_volt_follow || override_volt)) {
 		if (override_volt) {
@@ -809,14 +827,31 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 
 	mutex_lock(&oc_lock);
 
-	if (cpu_ll_target_khz || g_ll_have_orig)
-		ret_ll = patch_cluster_idx0(cpu_ll_rep_cpu, cpu_ll_target_khz,
-					     &g_ll_orig_khz, &g_ll_orig_volt,
-					     &g_ll_have_orig);
-	if (cpu_b_target_khz || g_b_have_orig)
-		ret_b = patch_cluster_idx0(cpu_b_rep_cpu, cpu_b_target_khz,
-					    &g_b_orig_khz, &g_b_orig_volt,
-					    &g_b_have_orig);
+	if (cpu_policy_targets_khz[0]) {
+		char targets[sizeof(cpu_policy_targets_khz)], *cursor, *token;
+		unsigned int i = 0;
+		strlcpy(targets, cpu_policy_targets_khz, sizeof(targets));
+		cursor = targets;
+		while ((token = strsep(&cursor, ",")) != NULL && i < cpu_policy_count) {
+			unsigned int target;
+			int r;
+			if (kstrtouint(strim(token), 10, &target)) { ret_ll = -EINVAL; break; }
+			cpu_policy_targets[i] = target;
+			r = patch_cluster_idx0(cpu_policy_reps[i], target,
+				&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
+				&cpu_policy_have_orig[i]);
+			if (r && !ret_ll) ret_ll = r;
+			i++;
+		}
+		if (cursor || i != cpu_policy_count) ret_ll = -EINVAL;
+	} else {
+		if (cpu_ll_target_khz || g_ll_have_orig)
+			ret_ll = patch_cluster_idx0(cpu_ll_rep_cpu, cpu_ll_target_khz,
+				&g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
+		if (cpu_b_target_khz || g_b_have_orig)
+			ret_b = patch_cluster_idx0(cpu_b_rep_cpu, cpu_b_target_khz,
+				&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
+	}
 
 	if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
@@ -1011,10 +1046,22 @@ static int guardian_thread_fn(void *unused)
 {
 	while (!kthread_should_stop()) {
 		mutex_lock(&oc_lock);
-		guardian_check_one(cpu_ll_rep_cpu, cpu_ll_target_khz, g_ll_orig_khz,
-				   g_ll_have_orig, g_ll_requested_min_khz);
-		guardian_check_one(cpu_b_rep_cpu, cpu_b_target_khz, g_b_orig_khz,
-				   g_b_have_orig, g_b_requested_min_khz);
+		{
+			unsigned int i;
+			bool dynamic_active = false;
+			for (i = 0; i < cpu_policy_count; i++)
+				if (cpu_policy_have_orig[i]) dynamic_active = true;
+			if (dynamic_active) {
+				for (i = 0; i < cpu_policy_count; i++)
+					guardian_check_one(cpu_policy_reps[i], cpu_policy_targets[i],
+						cpu_policy_orig_khz[i], cpu_policy_have_orig[i], 0);
+			} else {
+				guardian_check_one(cpu_ll_rep_cpu, cpu_ll_target_khz, g_ll_orig_khz,
+					g_ll_have_orig, g_ll_requested_min_khz);
+				guardian_check_one(cpu_b_rep_cpu, cpu_b_target_khz, g_b_orig_khz,
+					g_b_have_orig, g_b_requested_min_khz);
+			}
+		}
 		mutex_unlock(&oc_lock);
 		msleep_interruptible(GUARDIAN_POLL_MS);
 	}
@@ -1733,12 +1780,24 @@ static void __exit oc_mt6789_exit(void)
 
 	mutex_lock(&oc_lock);
 	gpu_restore_working_table();
-	if (g_ll_have_orig)
-		patch_cluster_idx0(cpu_ll_rep_cpu, 0, &g_ll_orig_khz,
-				   &g_ll_orig_volt, &g_ll_have_orig);
-	if (g_b_have_orig)
-		patch_cluster_idx0(cpu_b_rep_cpu, 0, &g_b_orig_khz,
-				   &g_b_orig_volt, &g_b_have_orig);
+	{
+		unsigned int i;
+		bool dynamic_active = false;
+		for (i = 0; i < cpu_policy_count; i++)
+			if (cpu_policy_have_orig[i]) dynamic_active = true;
+		if (dynamic_active) {
+			for (i = 0; i < cpu_policy_count; i++)
+				if (cpu_policy_have_orig[i])
+					patch_cluster_idx0(cpu_policy_reps[i], 0,
+						&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
+						&cpu_policy_have_orig[i]);
+		} else {
+			if (g_ll_have_orig) patch_cluster_idx0(cpu_ll_rep_cpu, 0,
+				&g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
+			if (g_b_have_orig) patch_cluster_idx0(cpu_b_rep_cpu, 0,
+				&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
+		}
+	}
 	mutex_unlock(&oc_lock);
 
 	if (g_apmixed_va) {
