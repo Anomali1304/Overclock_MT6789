@@ -506,10 +506,9 @@ struct cpufreq_mtk_mirror {
 };
 
 /*
- * Representative CPUs are discovered from live cpufreq policies at module
- * init; CPU numbers are not assumed to be 0/4/6. The current control ABI has
- * two CPU targets (little/big), so choose the lowest- and highest-frequency
- * policies when the platform exposes more than two policies.
+ * All cpufreq policies are discovered at module init. cpu_ll_rep_cpu and
+ * cpu_b_rep_cpu are legacy aliases for the lowest/highest policy only;
+ * cpu_policy_targets_khz and the dynamic arrays cover every discovered policy.
  */
 #define MAX_CPU_POLICIES 8
 static unsigned int cpu_policy_reps[MAX_CPU_POLICIES];
@@ -520,6 +519,9 @@ static unsigned int cpu_policy_orig_khz[MAX_CPU_POLICIES];
 static unsigned int cpu_policy_orig_volt[MAX_CPU_POLICIES];
 static bool cpu_policy_have_orig[MAX_CPU_POLICIES];
 static unsigned int cpu_policy_targets[MAX_CPU_POLICIES];
+/* Voltage guardian state belongs to each policy, not to little/big aliases. */
+static unsigned int cpu_policy_applied_volt[MAX_CPU_POLICIES];
+static bool cpu_policy_voltage_active[MAX_CPU_POLICIES];
 static unsigned int cpu_ll_rep_cpu = UINT_MAX;
 static unsigned int cpu_b_rep_cpu  = UINT_MAX;
 static char cpu_policy_targets_khz[128];
@@ -606,6 +608,16 @@ static unsigned int cpu_b_volt_raw;
 static unsigned int cpu_volt_reassert = 1;
 static unsigned int g_ll_applied_volt, g_b_applied_volt;
 static bool g_ll_voltage_active, g_b_voltage_active;
+
+static int cpu_policy_index(unsigned int rep_cpu)
+{
+	unsigned int i;
+
+	for (i = 0; i < cpu_policy_count; i++)
+		if (cpu_policy_reps[i] == rep_cpu)
+			return (int)i;
+	return -ENOENT;
+}
 
 module_param(cpu_volt_follow, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_follow, "1=derive idx0 LUT voltage above stock; 0=frequency-only unless explicit voltage is set");
@@ -704,7 +716,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	unsigned int use_khz, cap_khz, old_max, new_volt, override_volt;
 	s64 dv = 0;
 	u32 raw;
-	int ret;
+	int ret, policy_idx;
 
 	policy = cpufreq_cpu_get(rep_cpu);
 	if (!policy)
@@ -715,6 +727,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		return -ENODATA;
 	}
 	c = (struct cpufreq_mtk_mirror *)policy->driver_data;
+	policy_idx = cpu_policy_index(rep_cpu);
 
 	if (!*have_orig) {
 		*orig_khz = policy->freq_table[0].frequency;
@@ -790,10 +803,16 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	      FIELD_PREP(LUT_FREQ, use_khz / 1000) |
 	      FIELD_PREP(LUT_VOLT, new_volt);
 	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE]);
+	if (policy_idx >= 0) {
+		cpu_policy_applied_volt[policy_idx] = new_volt;
+		cpu_policy_voltage_active[policy_idx] =
+			use_khz > *orig_khz && new_volt > *orig_volt;
+	}
 	if (rep_cpu == cpu_ll_rep_cpu) {
 		g_ll_applied_volt = new_volt;
 		g_ll_voltage_active = use_khz > *orig_khz && new_volt > *orig_volt;
-	} else {
+	}
+	if (rep_cpu == cpu_b_rep_cpu) {
 		g_b_applied_volt = new_volt;
 		g_b_voltage_active = use_khz > *orig_khz && new_volt > *orig_volt;
 	}
@@ -848,13 +867,21 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 		char targets[sizeof(cpu_policy_targets_khz)], *cursor, *token;
 		unsigned int parsed[MAX_CPU_POLICIES];
 		unsigned int previous_targets[MAX_CPU_POLICIES];
+		unsigned int previous_orig_khz[MAX_CPU_POLICIES];
+		unsigned int previous_orig_volt[MAX_CPU_POLICIES];
+		unsigned int previous_applied_volt[MAX_CPU_POLICIES];
 		bool previous_active[MAX_CPU_POLICIES];
+		bool previous_voltage_active[MAX_CPU_POLICIES];
 		unsigned int i = 0, applied = 0;
 		int r = 0;
 
 		for (i = 0; i < cpu_policy_count; i++) {
 			previous_targets[i] = cpu_policy_targets[i];
+			previous_orig_khz[i] = cpu_policy_orig_khz[i];
+			previous_orig_volt[i] = cpu_policy_orig_volt[i];
 			previous_active[i] = cpu_policy_have_orig[i];
+			previous_applied_volt[i] = cpu_policy_applied_volt[i];
+			previous_voltage_active[i] = cpu_policy_voltage_active[i];
 		}
 		i = 0;
 
@@ -893,6 +920,21 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 						&cpu_policy_orig_khz[j], &cpu_policy_orig_volt[j],
 						&cpu_policy_have_orig[j]);
 				}
+				cpu_policy_targets[j] = previous_targets[j];
+				cpu_policy_orig_khz[j] = previous_orig_khz[j];
+				cpu_policy_orig_volt[j] = previous_orig_volt[j];
+				cpu_policy_have_orig[j] = previous_active[j];
+				cpu_policy_applied_volt[j] = previous_applied_volt[j];
+				cpu_policy_voltage_active[j] = previous_voltage_active[j];
+			}
+			/* The policy that failed may have captured stock state before failing. */
+			if (i < cpu_policy_count) {
+				cpu_policy_orig_khz[i] = previous_orig_khz[i];
+				cpu_policy_orig_volt[i] = previous_orig_volt[i];
+				cpu_policy_have_orig[i] = previous_active[i];
+				cpu_policy_targets[i] = previous_targets[i];
+				cpu_policy_applied_volt[i] = previous_applied_volt[i];
+				cpu_policy_voltage_active[i] = previous_voltage_active[i];
 			}
 			ret_ll = r;
 		}
@@ -1034,18 +1076,25 @@ static void guardian_reassert_voltage(struct cpufreq_policy *policy,
 {
 	struct cpufreq_mtk_mirror *c = policy->driver_data;
 	unsigned int want, now;
+	int policy_idx = cpu_policy_index(rep_cpu);
 	u32 raw;
 
 	if (!cpu_volt_reassert || !c)
 		return;
-	if (rep_cpu == cpu_ll_rep_cpu) {
+	if (policy_idx >= 0) {
+		if (!cpu_policy_voltage_active[policy_idx])
+			return;
+		want = cpu_policy_applied_volt[policy_idx];
+	} else if (rep_cpu == cpu_ll_rep_cpu) {
 		if (!g_ll_voltage_active)
 			return;
 		want = g_ll_applied_volt;
-	} else {
+	} else if (rep_cpu == cpu_b_rep_cpu) {
 		if (!g_b_voltage_active)
 			return;
 		want = g_b_applied_volt;
+	} else {
+		return;
 	}
 	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
 	now = FIELD_GET(LUT_VOLT, raw);
