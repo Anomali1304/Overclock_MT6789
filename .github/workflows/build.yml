@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, cpu-policy-auto-rep]
     paths:
       - 'overclock_mt6789.c'
       - 'Makefile'
