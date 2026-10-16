@@ -90,3 +90,15 @@ check-clang:
 		echo "WARNING: $(KDIR)/.config not found — cannot verify CONFIG_CFI_CLANG."; \
 		echo "  Make sure KDIR points at a completed, configured kernel build tree."; \
 	fi
+
+# Build both ABI-compatible variants. The module's internal name remains
+# overclock_mt6789, so the sysfs path stays /sys/module/overclock_mt6789.
+variants:
+	$(MAKE) clean
+	$(MAKE) all EXTRA_CFLAGS="$(EXTRA_CFLAGS) -DOC_HIDE_PRIME_PARAMS"
+	cp overclock_mt6789.ko overclock_mt6789_2p.ko
+	$(MAKE) clean
+	$(MAKE) all
+	cp overclock_mt6789.ko overclock_mt6789_3p.ko
+	$(MAKE) clean
+	@echo "Built overclock_mt6789_2p.ko (Prime params hidden) and overclock_mt6789_3p.ko (Prime params enabled)."
