@@ -530,10 +530,12 @@ static char cpu_policy_targets_khz[128];
 static char cpu_policy_representatives[64] = "not detected";
 module_param_named(cpu_little_rep_cpu, cpu_ll_rep_cpu, uint, 0444);
 module_param_named(cpu_big_rep_cpu, cpu_b_rep_cpu, uint, 0444);
+#ifndef OC_HIDE_PRIME_PARAMS
 module_param(cpu_prime_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_little_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
 MODULE_PARM_DESC(cpu_big_rep_cpu, "Auto-discovered representative CPU# for big policy");
 MODULE_PARM_DESC(cpu_prime_rep_cpu, "Auto-discovered representative CPU# for third (Prime) policy; UINT_MAX when unavailable");
+#endif
 
 static int discover_cpu_policy_representatives(void)
 {
@@ -647,8 +649,10 @@ module_param_named(cpu_little_volt_raw, cpu_ll_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_little_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
 module_param_named(cpu_big_volt_raw, cpu_b_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_big_volt_raw, "Explicit Big/A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+#ifndef OC_HIDE_PRIME_PARAMS
 module_param(cpu_prime_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_prime_volt_raw, "Explicit Prime idx0 LUT voltage raw mV*100; only used when a third CPU policy is detected; 0=derive from LUT slope");
+#endif
 module_param(cpu_volt_reassert, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_reassert, "1=reassert LUT voltage if EEM/SVS overwrites it; 0=off");
 /* Requested CPU minimums are kept independently from cpufreq_policy.
@@ -661,8 +665,10 @@ module_param_named(cpu_little_target_khz, cpu_ll_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_little_target_khz, "Little cluster idx0 target freq in KHz (0=leave alone)");
 module_param_named(cpu_big_target_khz, cpu_b_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_big_target_khz, "Big cluster idx0 target freq in KHz (0=leave alone)");
+#ifndef OC_HIDE_PRIME_PARAMS
 module_param(cpu_prime_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_prime_target_khz, "Prime cluster idx0 target freq in KHz (active only when three CPU policies are detected; 0=leave alone)");
+#endif
 
 static char cpu_oc_result[256] = "not applied yet";
 static int cpu_oc_result_get(char *buf, const struct kernel_param *kp)
@@ -1110,9 +1116,11 @@ static const struct kernel_param_ops cpu_prime_min_khz_ops = {
 	.set = cpu_prime_min_khz_set,
 	.get = cpu_prime_min_khz_get,
 };
+#ifndef OC_HIDE_PRIME_PARAMS
 module_param_cb(cpu_prime_min_khz, &cpu_prime_min_khz_ops, NULL, 0644);
 MODULE_PARM_DESC(cpu_prime_min_khz,
 		  "Requested Prime minimum KHz; active only when three CPU policies are detected");
+#endif
 
 #define GUARDIAN_POLL_MS  50
 
