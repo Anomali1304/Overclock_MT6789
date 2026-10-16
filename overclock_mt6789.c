@@ -968,12 +968,12 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 
 	if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW || ret_prime == -EOVERFLOW)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: LUT voltage exceeded delta/absolute ceiling (ll=%d b=%d, delta=%u, abs=%u)",
-			 ret_ll, ret_b, cpu_volt_max_delta_raw, cpu_volt_abs_max());
+			 "FAIL: LUT voltage exceeded delta/absolute ceiling (little=%d big=%d prime=%d, delta=%u, abs=%u)",
+			 ret_ll, ret_b, ret_prime, cpu_volt_max_delta_raw, cpu_volt_abs_max());
 	else if (ret_ll == -ERANGE || ret_b == -ERANGE || ret_prime == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: target exceeds OC limit (ll=%u b=%u KHz)",
-			 cpu_ll_target_khz, cpu_b_target_khz);
+			 "FAIL: target exceeds OC limit (little=%u big=%u prime=%u KHz)",
+			 cpu_ll_target_khz, cpu_b_target_khz, cpu_prime_target_khz);
 	else if (ret_ll == -ETIMEDOUT || ret_b == -ETIMEDOUT || ret_prime == -ETIMEDOUT)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: cluster would not leave idx0 within %ums",
@@ -981,9 +981,6 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 	else if (ret_ll || ret_b || ret_prime)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: CPU apply failed (little=%d big=%d prime=%d)", ret_ll, ret_b, ret_prime);
-	else if (cpu_policy_targets_khz[0])
-		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "OK: applied targets to %u detected CPU policies", cpu_policy_count);
 	else
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "OK: little=%uKHz big=%uKHz prime=%uKHz policies=%u",
@@ -1905,24 +1902,17 @@ static void __exit oc_mt6789_exit(void)
 
 	mutex_lock(&oc_lock);
 	gpu_restore_working_table();
-	{
-		unsigned int i;
-		bool dynamic_active = false;
-		for (i = 0; i < cpu_policy_count; i++)
-			if (cpu_policy_have_orig[i]) dynamic_active = true;
-		if (dynamic_active) {
-			for (i = 0; i < cpu_policy_count; i++)
-				if (cpu_policy_have_orig[i])
-					patch_cluster_idx0(cpu_policy_reps[i], 0,
-						&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
-						&cpu_policy_have_orig[i]);
-		} else {
-			if (g_ll_have_orig) patch_cluster_idx0(cpu_ll_rep_cpu, 0,
-				&g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
-			if (g_b_have_orig) patch_cluster_idx0(cpu_b_rep_cpu, 0,
-				&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
-		}
-	}
+	/* Restore every independently controlled cluster, regardless of which one was active. */
+	if (g_ll_have_orig)
+		patch_cluster_idx0(cpu_ll_rep_cpu, 0,
+			&g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
+	if (g_b_have_orig)
+		patch_cluster_idx0(cpu_b_rep_cpu, 0,
+			&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
+	if (cpu_policy_count >= 3 && cpu_policy_have_orig[2])
+		patch_cluster_idx0(cpu_policy_reps[2], 0,
+			&cpu_policy_orig_khz[2], &cpu_policy_orig_volt[2],
+			&cpu_policy_have_orig[2]);
 	mutex_unlock(&oc_lock);
 
 	if (g_apmixed_va) {
