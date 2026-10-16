@@ -622,6 +622,7 @@ static unsigned int cpu_volt_max_delta_raw = CPU_VOLT_DELTA_DEFAULT;
 static unsigned int cpu_volt_abs_max_raw = CPU_VOLT_ABS_DEFAULT;
 static unsigned int cpu_ll_volt_raw;
 static unsigned int cpu_b_volt_raw;
+static unsigned int cpu_prime_volt_raw;
 static unsigned int cpu_volt_reassert = 1;
 static unsigned int g_ll_applied_volt, g_b_applied_volt;
 static bool g_ll_voltage_active, g_b_voltage_active;
@@ -645,7 +646,9 @@ MODULE_PARM_DESC(cpu_volt_abs_max_raw, "Final LUT voltage ceiling raw mV*100; ha
 module_param_named(cpu_little_volt_raw, cpu_ll_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_little_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
 module_param_named(cpu_big_volt_raw, cpu_b_volt_raw, uint, 0644);
-MODULE_PARM_DESC(cpu_big_volt_raw, "Explicit A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+MODULE_PARM_DESC(cpu_big_volt_raw, "Explicit Big/A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+module_param(cpu_prime_volt_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_prime_volt_raw, "Explicit Prime idx0 LUT voltage raw mV*100; only used when a third CPU policy is detected; 0=derive from LUT slope");
 module_param(cpu_volt_reassert, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_reassert, "1=reassert LUT voltage if EEM/SVS overwrites it; 0=off");
 /* Requested CPU minimums are kept independently from cpufreq_policy.
@@ -771,12 +774,14 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 
 
 	/* Calculate voltage before any MMIO write; reject out-of-limit requests. */
-	if (policy_idx >= 0 && rep_cpu != cpu_ll_rep_cpu &&
-		    rep_cpu != cpu_b_rep_cpu)
-		override_volt = 0; /* Intermediate policies derive voltage from their own LUT slope. */
+	if (rep_cpu == cpu_ll_rep_cpu)
+		override_volt = cpu_ll_volt_raw;
+	else if (rep_cpu == cpu_b_rep_cpu)
+		override_volt = cpu_b_volt_raw;
+	else if (cpu_policy_count >= 3 && rep_cpu == cpu_prime_rep_cpu)
+		override_volt = cpu_prime_volt_raw;
 	else
-		override_volt = (rep_cpu == cpu_ll_rep_cpu) ?
-				cpu_ll_volt_raw : cpu_b_volt_raw;
+		override_volt = 0; /* Other policies derive voltage from their own LUT slope. */
 	new_volt = *orig_volt;
 	if (use_khz > *orig_khz && (cpu_volt_follow || override_volt)) {
 		if (override_volt) {
