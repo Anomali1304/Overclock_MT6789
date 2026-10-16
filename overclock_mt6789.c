@@ -524,13 +524,9 @@ static unsigned int cpu_policy_applied_volt[MAX_CPU_POLICIES];
 static bool cpu_policy_voltage_active[MAX_CPU_POLICIES];
 static unsigned int cpu_ll_rep_cpu = UINT_MAX;
 static unsigned int cpu_b_rep_cpu  = UINT_MAX;
+/* Internal legacy buffer; no module parameter is exported for the list. */
 static char cpu_policy_targets_khz[128];
-/* Runtime-generated list: one representative for every discovered cpufreq policy. */
 static char cpu_policy_representatives[64] = "not detected";
-module_param_string(cpu_policy_targets_khz, cpu_policy_targets_khz, sizeof(cpu_policy_targets_khz), 0644);
-MODULE_PARM_DESC(cpu_policy_targets_khz, "Comma-separated target KHz per detected policy in representative-CPU order; 0 restores stock");
-module_param_string(cpu_policy_representatives, cpu_policy_representatives, sizeof(cpu_policy_representatives), 0444);
-MODULE_PARM_DESC(cpu_policy_representatives, "READ-ONLY: auto-detected representative CPU IDs for every cpufreq policy, in policy order");
 module_param(cpu_ll_rep_cpu, uint, 0444);
 module_param(cpu_b_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
@@ -991,6 +987,89 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 	return 0;
 }
 
+static ssize_t cpu_policy_target_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	struct cpu_policy_target_attr *ta =
+		container_of(attr, struct cpu_policy_target_attr, attr);
+	if (ta->policy_index >= cpu_policy_count)
+		return -ENODEV;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", cpu_policy_targets[ta->policy_index]);
+}
+
+static ssize_t cpu_policy_target_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	struct cpu_policy_target_attr *ta =
+		container_of(attr, struct cpu_policy_target_attr, attr);
+	unsigned int i = ta->policy_index, target, old_target;
+	int ret;
+
+	if (i >= cpu_policy_count || kstrtouint(buf, 10, &target))
+		return -EINVAL;
+	if (!cpu_policy_discovery_ok || atomic_read(&oc_mt6789_suspended))
+		return -EBUSY;
+	mutex_lock(&oc_lock);
+	old_target = cpu_policy_targets[i];
+	ret = patch_cluster_idx0(cpu_policy_reps[i], target,
+		&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
+		&cpu_policy_have_orig[i]);
+	if (ret) {
+		cpu_policy_targets[i] = old_target;
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "FAIL: %s CPU%u target=%u ret=%d",
+			 cpu_policy_names[i], cpu_policy_reps[i], target, ret);
+		mutex_unlock(&oc_lock);
+		return ret;
+	}
+	cpu_policy_targets[i] = target;
+	snprintf(cpu_oc_result, sizeof(cpu_oc_result), "OK: %s CPU%u target=%u KHz",
+		 cpu_policy_names[i], cpu_policy_reps[i], target);
+	mutex_unlock(&oc_lock);
+	return count;
+}
+
+static int cpu_policy_sysfs_init(void)
+{
+	unsigned int i;
+	int ret;
+
+	if (!cpu_policy_discovery_ok || !cpu_policy_count)
+		return -ENODEV;
+	cpu_policy_kobj = kobject_create_and_add("cpu_policy", kernel_kobj);
+	if (!cpu_policy_kobj)
+		return -ENOMEM;
+	for (i = 0; i < cpu_policy_count; i++) {
+		sysfs_attr_init(&cpu_policy_target_attrs[i].attr.attr);
+		cpu_policy_target_attrs[i].policy_index = i;
+		cpu_policy_target_attrs[i].attr.attr.name = cpu_policy_names[i];
+		cpu_policy_target_attrs[i].attr.attr.mode = 0644;
+		cpu_policy_target_attrs[i].attr.show = cpu_policy_target_show;
+		cpu_policy_target_attrs[i].attr.store = cpu_policy_target_store;
+		cpu_policy_attr_ptrs[i] = &cpu_policy_target_attrs[i].attr.attr;
+		ret = sysfs_create_file(cpu_policy_kobj, cpu_policy_attr_ptrs[i]);
+		if (ret) {
+			while (i > 0)
+				sysfs_remove_file(cpu_policy_kobj, cpu_policy_attr_ptrs[--i]);
+			kobject_put(cpu_policy_kobj);
+			cpu_policy_kobj = NULL;
+			return ret;
+		}
+	}
+	return 0;
+}
+
+static void cpu_policy_sysfs_exit(void)
+{
+	unsigned int i;
+	if (!cpu_policy_kobj)
+		return;
+	for (i = 0; i < cpu_policy_count; i++)
+		sysfs_remove_file(cpu_policy_kobj, cpu_policy_attr_ptrs[i]);
+	kobject_put(cpu_policy_kobj);
+	cpu_policy_kobj = NULL;
+}
+
 static int cpu_oc_apply_get(char *buf, const struct kernel_param *kp)
 {
 	return scnprintf(buf, PAGE_SIZE, "0\n");
@@ -1357,6 +1436,18 @@ static fn_ski_limit_t ski_custom_upbound;
 static fn_ski_bottom_t ski_get_bottom;
 static fn_ski_ceiling_t ski_get_ceiling;
 static struct kobject *ski_kobj;
+static struct kobject *cpu_policy_kobj;
+struct cpu_policy_target_attr {
+	struct kobj_attribute attr;
+	unsigned int policy_index;
+};
+static struct cpu_policy_target_attr cpu_policy_target_attrs[MAX_CPU_POLICIES];
+static struct attribute *cpu_policy_attr_ptrs[MAX_CPU_POLICIES + 1];
+static const char * const cpu_policy_names[] = {
+	"little_target_khz", "big_target_khz", "prime_target_khz",
+	"policy3_target_khz", "policy4_target_khz", "policy5_target_khz",
+	"policy6_target_khz", "policy7_target_khz"
+};
 static unsigned int ski_custom_max_khz;
 static unsigned int ski_custom_min_khz;
 
@@ -1864,6 +1955,10 @@ static int __init oc_mt6789_init(void)
 		g_guardian_thread = NULL;
 	}
 
+	ret = cpu_policy_sysfs_init();
+	if (ret)
+		pr_warn("oc_mt6789: CPU policy sysfs setup failed (%d)\n", ret);
+
 	ret = oc_ski_init();
 	if (ret)
 		pr_warn("oc_mt6789: SKI sysfs setup failed (%d)\n", ret);
@@ -1874,6 +1969,7 @@ static int __init oc_mt6789_init(void)
 
 static void __exit oc_mt6789_exit(void)
 {
+	cpu_policy_sysfs_exit();
 	oc_ski_exit();
 	pr_info("overclock_mt6789: unloading\n");
 
