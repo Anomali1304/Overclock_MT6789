@@ -412,11 +412,6 @@ static int gpu_oc_apply_set(const char *val, const struct kernel_param *kpp)
 	if (ret || v != 1)
 		return ret;
 
-	if (!cpu_policy_discovery_ok || !cpu_policy_count || cpu_policy_overflow) {
-		snprintf(cpu_oc_result, sizeof(cpu_oc_result), "FAIL: CPU policy discovery invalid or exceeds limit");
-		return 0;
-	}
-
 	if (atomic_read(&oc_mt6789_suspended)) {
 		snprintf(gpu_oc_result, sizeof(gpu_oc_result), "FAIL: device suspending, refused");
 		gpu_oc_apply = 0;
@@ -551,7 +546,7 @@ static int discover_cpu_policy_representatives(void)
 		if (!policy)
 			continue;
 		cpumask_or(&seen, &seen, policy->related_cpus);
-		rep = cpumask_first(&policy->related_cpus);
+		rep = cpumask_first(policy->related_cpus);
 		if (rep < nr_cpu_ids && policy->freq_table) {
 			if (cpu_policy_count < MAX_CPU_POLICIES)
 				cpu_policy_reps[cpu_policy_count++] = rep;
@@ -834,6 +829,12 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 		return -EINVAL;
 	if (trigger != 1)
 		return 0;
+
+	if (!cpu_policy_discovery_ok || !cpu_policy_count || cpu_policy_overflow) {
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "FAIL: CPU policy discovery invalid or exceeds limit");
+		return 0;
+	}
 
 	if (atomic_read(&oc_mt6789_suspended)) {
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
