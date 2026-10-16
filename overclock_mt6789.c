@@ -624,10 +624,10 @@ static unsigned int cpu_prime_target_khz = 0;
 static int cpu_prime_status_get(char *buf, const struct kernel_param *kp)
 {
 	if (cpu_policy_overflow || !cpu_policy_discovery_ok)
-		return scnprintf(buf, PAGE_SIZE, "error\\n");
+		return scnprintf(buf, PAGE_SIZE, "error\n");
 	if (cpu_policy_count >= 3 && cpu_prime_rep_cpu != UINT_MAX)
-		return scnprintf(buf, PAGE_SIZE, "active\\n");
-	return scnprintf(buf, PAGE_SIZE, "inactive\\n");
+		return scnprintf(buf, PAGE_SIZE, "active\n");
+	return scnprintf(buf, PAGE_SIZE, "inactive\n");
 }
 static const struct kernel_param_ops cpu_prime_status_ops = {
 	.get = cpu_prime_status_get,
