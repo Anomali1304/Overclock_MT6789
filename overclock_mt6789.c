@@ -762,7 +762,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 
 
 	/* Calculate voltage before any MMIO write; reject out-of-limit requests. */
-	if (cpu_policy_targets_khz[0] && rep_cpu != cpu_ll_rep_cpu &&
+	if (policy_idx >= 0 && rep_cpu != cpu_ll_rep_cpu &&
 		    rep_cpu != cpu_b_rep_cpu)
 		override_volt = 0; /* Intermediate policies derive voltage from their own LUT slope. */
 	else
