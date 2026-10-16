@@ -523,6 +523,7 @@ static int discover_cpu_policy_representatives(void)
 	struct cpufreq_policy *policy;
 	unsigned int cpu, rep, low_rep = UINT_MAX, high_rep = UINT_MAX;
 	unsigned int low_max = UINT_MAX, high_max = 0;
+	unsigned int policy_max;
 	cpumask_t seen;
 
 	cpumask_clear(&seen);
@@ -538,18 +539,21 @@ static int discover_cpu_policy_representatives(void)
 			cpufreq_cpu_put(policy);
 			continue;
 		}
-		if (policy->max && policy->max < low_max) {
-			low_max = policy->max;
+		policy_max = policy->cpuinfo.max_freq ?
+			     policy->cpuinfo.max_freq : policy->max;
+		if (policy_max && policy_max < low_max) {
+			low_max = policy_max;
 			low_rep = rep;
 		}
-		if (policy->max > high_max) {
-			high_max = policy->max;
+		if (policy_max > high_max) {
+			high_max = policy_max;
 			high_rep = rep;
 		}
 		cpufreq_cpu_put(policy);
 	}
 
-	if (low_rep == UINT_MAX || high_rep == UINT_MAX) {
+	if (low_rep == UINT_MAX || high_rep == UINT_MAX ||
+	    low_rep == high_rep) {
 		pr_err("oc_mt6789: unable to discover CPU cpufreq policies (low=%u high=%u)\n",
 		       low_rep, high_rep);
 		return -ENODEV;
