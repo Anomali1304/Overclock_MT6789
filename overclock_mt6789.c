@@ -412,7 +412,7 @@ static int gpu_oc_apply_set(const char *val, const struct kernel_param *kpp)
 	if (ret || v != 1)
 		return ret;
 
-	if (!cpu_policy_count || cpu_policy_overflow) {
+	if (!cpu_policy_discovery_ok || !cpu_policy_count || cpu_policy_overflow) {
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result), "FAIL: CPU policy discovery invalid or exceeds limit");
 		return 0;
 	}
@@ -520,6 +520,7 @@ struct cpufreq_mtk_mirror {
 static unsigned int cpu_policy_reps[MAX_CPU_POLICIES];
 static unsigned int cpu_policy_count;
 static bool cpu_policy_overflow;
+static bool cpu_policy_discovery_ok;
 static unsigned int cpu_policy_orig_khz[MAX_CPU_POLICIES];
 static unsigned int cpu_policy_orig_volt[MAX_CPU_POLICIES];
 static bool cpu_policy_have_orig[MAX_CPU_POLICIES];
@@ -588,6 +589,7 @@ static int discover_cpu_policy_representatives(void)
 		return -ENODEV;
 	cpu_ll_rep_cpu = low_rep;
 	cpu_b_rep_cpu = high_rep;
+	cpu_policy_discovery_ok = true;
 	pr_info("oc_mt6789: auto CPU policy reps: low-policy CPU%u (max=%u KHz), high-policy CPU%u (max=%u KHz)\n",
 		low_rep, low_max, high_rep, high_max);
 	return 0;
@@ -774,7 +776,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		    new_volt > cpu_volt_abs_max()) {
 			pr_err("oc_mt6789: cpu%u voltage request %u raw refused (stock=%u, delta limit=%u, abs limit=%u)\n",
 			       rep_cpu, new_volt, *orig_volt, cpu_volt_max_delta_raw, cpu_volt_abs_max());
-			*have_orig = false;
+			/* Keep the saved stock state intact so rollback/unload can restore it. */
 			cpufreq_cpu_put(policy);
 			return -EOVERFLOW;
 		}
