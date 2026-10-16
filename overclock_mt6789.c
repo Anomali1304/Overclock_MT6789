@@ -616,6 +616,49 @@ static unsigned int cpu_ll_target_khz = 0; /* exposed as cpu_little_target_khz *
 static unsigned int cpu_b_target_khz  = 0; /* exposed as cpu_big_target_khz */
 static unsigned int cpu_prime_target_khz = 0;
 
+/*
+ * Prime is available only when discovery confirms a third CPU policy.
+ * Keep this as one .ko: status is reported dynamically and Prime writes fail
+ * with -ENODEV on two-policy layouts.
+ */
+static int cpu_prime_status_get(char *buf, const struct kernel_param *kp)
+{
+	if (cpu_policy_overflow || !cpu_policy_discovery_ok)
+		return scnprintf(buf, PAGE_SIZE, "error\\n");
+	if (cpu_policy_count >= 3 && cpu_prime_rep_cpu != UINT_MAX)
+		return scnprintf(buf, PAGE_SIZE, "active\\n");
+	return scnprintf(buf, PAGE_SIZE, "inactive\\n");
+}
+static const struct kernel_param_ops cpu_prime_status_ops = {
+	.get = cpu_prime_status_get,
+};
+module_param_cb(cpu_prime_status, &cpu_prime_status_ops, NULL, 0444);
+MODULE_PARM_DESC(cpu_prime_status, "Prime policy status: active, inactive, or error");
+
+static int cpu_prime_target_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int value;
+	int ret;
+
+	if (!cpu_policy_discovery_ok || cpu_policy_overflow)
+		return -EAGAIN;
+	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
+		return -ENODEV;
+	ret = kstrtouint(val, 0, &value);
+	if (ret)
+		return ret;
+	cpu_prime_target_khz = value;
+	return 0;
+}
+static int cpu_prime_target_get(char *buf, const struct kernel_param *kp)
+{
+	return param_get_uint(buf, kp);
+}
+static const struct kernel_param_ops cpu_prime_target_ops = {
+	.set = cpu_prime_target_set,
+	.get = cpu_prime_target_get,
+};
+
 /* Candidate cpufreq-hw LUT voltage; this is not a direct PMIC command. */
 static unsigned int cpu_volt_follow = 1;
 static unsigned int cpu_volt_max_delta_raw = CPU_VOLT_DELTA_DEFAULT;
@@ -623,6 +666,29 @@ static unsigned int cpu_volt_abs_max_raw = CPU_VOLT_ABS_DEFAULT;
 static unsigned int cpu_ll_volt_raw;
 static unsigned int cpu_b_volt_raw;
 static unsigned int cpu_prime_volt_raw;
+static int cpu_prime_volt_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int value;
+	int ret;
+
+	if (!cpu_policy_discovery_ok || cpu_policy_overflow)
+		return -EAGAIN;
+	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
+		return -ENODEV;
+	ret = kstrtouint(val, 0, &value);
+	if (ret)
+		return ret;
+	cpu_prime_volt_raw = value;
+	return 0;
+}
+static int cpu_prime_volt_get(char *buf, const struct kernel_param *kp)
+{
+	return param_get_uint(buf, kp);
+}
+static const struct kernel_param_ops cpu_prime_volt_ops = {
+	.set = cpu_prime_volt_set,
+	.get = cpu_prime_volt_get,
+};
 static unsigned int cpu_volt_reassert = 1;
 static unsigned int g_ll_applied_volt, g_b_applied_volt;
 static bool g_ll_voltage_active, g_b_voltage_active;
@@ -647,7 +713,7 @@ module_param_named(cpu_little_volt_raw, cpu_ll_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_little_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
 module_param_named(cpu_big_volt_raw, cpu_b_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_big_volt_raw, "Explicit Big/A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
-module_param(cpu_prime_volt_raw, uint, 0644);
+module_param_cb(cpu_prime_volt_raw, &cpu_prime_volt_ops, &cpu_prime_volt_raw, 0644);
 MODULE_PARM_DESC(cpu_prime_volt_raw, "Explicit Prime idx0 LUT voltage raw mV*100; only used when a third CPU policy is detected; 0=derive from LUT slope");
 module_param(cpu_volt_reassert, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_reassert, "1=reassert LUT voltage if EEM/SVS overwrites it; 0=off");
@@ -661,7 +727,7 @@ module_param_named(cpu_little_target_khz, cpu_ll_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_little_target_khz, "Little cluster idx0 target freq in KHz (0=leave alone)");
 module_param_named(cpu_big_target_khz, cpu_b_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_big_target_khz, "Big cluster idx0 target freq in KHz (0=leave alone)");
-module_param(cpu_prime_target_khz, uint, 0644);
+module_param_cb(cpu_prime_target_khz, &cpu_prime_target_ops, &cpu_prime_target_khz, 0644);
 MODULE_PARM_DESC(cpu_prime_target_khz, "Prime cluster idx0 target freq in KHz (active only when three CPU policies are detected; 0=leave alone)");
 
 static char cpu_oc_result[256] = "not applied yet";
