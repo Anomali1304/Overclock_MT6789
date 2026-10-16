@@ -506,8 +506,8 @@ struct cpufreq_mtk_mirror {
 };
 
 /*
- * All cpufreq policies are discovered at module init. cpu_ll_rep_cpu and
- * cpu_b_rep_cpu are legacy aliases for the lowest/highest policy only;
+ * All cpufreq policies are discovered at module init. cpu_little_rep_cpu and
+ * cpu_big_rep_cpu are the public names for the little/big policies;
  * cpu_policy_targets_khz and the dynamic arrays cover every discovered policy.
  */
 #define MAX_CPU_POLICIES 8
@@ -528,11 +528,11 @@ static unsigned int cpu_prime_rep_cpu = UINT_MAX;
 /* Internal legacy buffer; no module parameter is exported for the list. */
 static char cpu_policy_targets_khz[128];
 static char cpu_policy_representatives[64] = "not detected";
-module_param(cpu_ll_rep_cpu, uint, 0444);
-module_param(cpu_b_rep_cpu, uint, 0444);
+module_param_named(cpu_little_rep_cpu, cpu_ll_rep_cpu, uint, 0444);
+module_param_named(cpu_big_rep_cpu, cpu_b_rep_cpu, uint, 0444);
 module_param(cpu_prime_rep_cpu, uint, 0444);
-MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
-MODULE_PARM_DESC(cpu_b_rep_cpu, "Auto-discovered representative CPU# for big policy");
+MODULE_PARM_DESC(cpu_little_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
+MODULE_PARM_DESC(cpu_big_rep_cpu, "Auto-discovered representative CPU# for big policy");
 MODULE_PARM_DESC(cpu_prime_rep_cpu, "Auto-discovered representative CPU# for third (Prime) policy; UINT_MAX when unavailable");
 
 static int discover_cpu_policy_representatives(void)
@@ -612,8 +612,8 @@ static int discover_cpu_policy_representatives(void)
 
 #define MAX_OC_ABSOLUTE_KHZ  2600000U
 
-static unsigned int cpu_ll_target_khz = 0;
-static unsigned int cpu_b_target_khz  = 0;
+static unsigned int cpu_ll_target_khz = 0; /* exposed as cpu_little_target_khz */
+static unsigned int cpu_b_target_khz  = 0; /* exposed as cpu_big_target_khz */
 static unsigned int cpu_prime_target_khz = 0;
 
 /* Candidate cpufreq-hw LUT voltage; this is not a direct PMIC command. */
@@ -642,10 +642,10 @@ module_param(cpu_volt_max_delta_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_max_delta_raw, "Maximum LUT voltage increase over stock, raw mV*100; default +200mV");
 module_param(cpu_volt_abs_max_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_abs_max_raw, "Final LUT voltage ceiling raw mV*100; hard-clamped to 115000 (1.15V)");
-module_param(cpu_ll_volt_raw, uint, 0644);
-MODULE_PARM_DESC(cpu_ll_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
-module_param(cpu_b_volt_raw, uint, 0644);
-MODULE_PARM_DESC(cpu_b_volt_raw, "Explicit A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+module_param_named(cpu_little_volt_raw, cpu_ll_volt_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_little_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
+module_param_named(cpu_big_volt_raw, cpu_b_volt_raw, uint, 0644);
+MODULE_PARM_DESC(cpu_big_volt_raw, "Explicit A76 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
 module_param(cpu_volt_reassert, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_reassert, "1=reassert LUT voltage if EEM/SVS overwrites it; 0=off");
 /* Requested CPU minimums are kept independently from cpufreq_policy.
@@ -654,10 +654,10 @@ static unsigned int g_ll_requested_min_khz;
 static unsigned int g_b_requested_min_khz;
 static unsigned int g_prime_requested_min_khz;
 static int          cpu_oc_apply      = 0;
-module_param(cpu_ll_target_khz, uint, 0644);
-MODULE_PARM_DESC(cpu_ll_target_khz, "Little cluster idx0 target freq in KHz (0=leave alone)");
-module_param(cpu_b_target_khz, uint, 0644);
-MODULE_PARM_DESC(cpu_b_target_khz, "Big cluster idx0 target freq in KHz (0=leave alone)");
+module_param_named(cpu_little_target_khz, cpu_ll_target_khz, uint, 0644);
+MODULE_PARM_DESC(cpu_little_target_khz, "Little cluster idx0 target freq in KHz (0=leave alone)");
+module_param_named(cpu_big_target_khz, cpu_b_target_khz, uint, 0644);
+MODULE_PARM_DESC(cpu_big_target_khz, "Big cluster idx0 target freq in KHz (0=leave alone)");
 module_param(cpu_prime_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_prime_target_khz, "Prime cluster idx0 target freq in KHz (active only when three CPU policies are detected; 0=leave alone)");
 
@@ -1069,8 +1069,8 @@ static const struct kernel_param_ops cpu_ll_min_khz_ops = {
 	.set = cpu_ll_min_khz_set,
 	.get = cpu_ll_min_khz_get,
 };
-module_param_cb(cpu_ll_min_khz, &cpu_ll_min_khz_ops, NULL, 0644);
-MODULE_PARM_DESC(cpu_ll_min_khz,
+module_param_cb(cpu_little_min_khz, &cpu_ll_min_khz_ops, NULL, 0644);
+MODULE_PARM_DESC(cpu_little_min_khz,
 		  "Requested little-cluster minimum KHz; persisted and guarded across policy refreshes");
 
 static int cpu_b_min_khz_set(const char *val, const struct kernel_param *kp)
@@ -1085,8 +1085,8 @@ static const struct kernel_param_ops cpu_b_min_khz_ops = {
 	.set = cpu_b_min_khz_set,
 	.get = cpu_b_min_khz_get,
 };
-module_param_cb(cpu_b_min_khz, &cpu_b_min_khz_ops, NULL, 0644);
-MODULE_PARM_DESC(cpu_b_min_khz,
+module_param_cb(cpu_big_min_khz, &cpu_b_min_khz_ops, NULL, 0644);
+MODULE_PARM_DESC(cpu_big_min_khz,
 		  "Requested big-cluster minimum KHz; persisted and guarded across policy refreshes");
 
 static int cpu_prime_min_khz_set(const char *val, const struct kernel_param *kp)
