@@ -524,13 +524,16 @@ static unsigned int cpu_policy_applied_volt[MAX_CPU_POLICIES];
 static bool cpu_policy_voltage_active[MAX_CPU_POLICIES];
 static unsigned int cpu_ll_rep_cpu = UINT_MAX;
 static unsigned int cpu_b_rep_cpu  = UINT_MAX;
+static unsigned int cpu_prime_rep_cpu = UINT_MAX;
 /* Internal legacy buffer; no module parameter is exported for the list. */
 static char cpu_policy_targets_khz[128];
 static char cpu_policy_representatives[64] = "not detected";
 module_param(cpu_ll_rep_cpu, uint, 0444);
 module_param(cpu_b_rep_cpu, uint, 0444);
+module_param(cpu_prime_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
-MODULE_PARM_DESC(cpu_b_rep_cpu, "Auto-discovered representative CPU# for highest-frequency policy");
+MODULE_PARM_DESC(cpu_b_rep_cpu, "Auto-discovered representative CPU# for big policy");
+MODULE_PARM_DESC(cpu_prime_rep_cpu, "Auto-discovered representative CPU# for third (Prime) policy; UINT_MAX when unavailable");
 
 static int discover_cpu_policy_representatives(void)
 {
@@ -587,6 +590,7 @@ static int discover_cpu_policy_representatives(void)
 	cpu_ll_rep_cpu = low_rep;
 	/* Three-policy layouts are Little/Big/Prime in ascending CPU-policy order. */
 	cpu_b_rep_cpu = (cpu_policy_count >= 3) ? cpu_policy_reps[1] : high_rep;
+	cpu_prime_rep_cpu = (cpu_policy_count >= 3) ? cpu_policy_reps[2] : UINT_MAX;
 	{
 		unsigned int i;
 		size_t off = 0;
@@ -648,6 +652,7 @@ MODULE_PARM_DESC(cpu_volt_reassert, "1=reassert LUT voltage if EEM/SVS overwrite
  * Some MTK drivers rebuild policy limits and overwrite policy->min. */
 static unsigned int g_ll_requested_min_khz;
 static unsigned int g_b_requested_min_khz;
+static unsigned int g_prime_requested_min_khz;
 static int          cpu_oc_apply      = 0;
 module_param(cpu_ll_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_ll_target_khz, "Little cluster idx0 target freq in KHz (0=leave alone)");
@@ -1084,6 +1089,26 @@ module_param_cb(cpu_b_min_khz, &cpu_b_min_khz_ops, NULL, 0644);
 MODULE_PARM_DESC(cpu_b_min_khz,
 		  "Requested big-cluster minimum KHz; persisted and guarded across policy refreshes");
 
+static int cpu_prime_min_khz_set(const char *val, const struct kernel_param *kp)
+{
+	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
+		return -ENODEV;
+	return cpu_min_khz_set(cpu_prime_rep_cpu, &g_prime_requested_min_khz, val);
+}
+static int cpu_prime_min_khz_get(char *buf, const struct kernel_param *kp)
+{
+	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
+		return scnprintf(buf, PAGE_SIZE, "0\\n");
+	return cpu_min_khz_get(cpu_prime_rep_cpu, g_prime_requested_min_khz, buf);
+}
+static const struct kernel_param_ops cpu_prime_min_khz_ops = {
+	.set = cpu_prime_min_khz_set,
+	.get = cpu_prime_min_khz_get,
+};
+module_param_cb(cpu_prime_min_khz, &cpu_prime_min_khz_ops, NULL, 0644);
+MODULE_PARM_DESC(cpu_prime_min_khz,
+		  "Requested Prime minimum KHz; active only when three CPU policies are detected");
+
 #define GUARDIAN_POLL_MS  50
 
 static struct task_struct *g_guardian_thread;
@@ -1175,12 +1200,19 @@ static int guardian_thread_fn(void *unused)
 			if (dynamic_active) {
 				for (i = 0; i < cpu_policy_count; i++)
 					guardian_check_one(cpu_policy_reps[i], cpu_policy_targets[i],
-						cpu_policy_orig_khz[i], cpu_policy_have_orig[i], 0);
+						cpu_policy_orig_khz[i], cpu_policy_have_orig[i],
+						i == 0 ? g_ll_requested_min_khz :
+						(i == 1 ? g_b_requested_min_khz :
+						(i == 2 ? g_prime_requested_min_khz : 0)));
 			} else {
 				guardian_check_one(cpu_ll_rep_cpu, cpu_ll_target_khz, g_ll_orig_khz,
 					g_ll_have_orig, g_ll_requested_min_khz);
 				guardian_check_one(cpu_b_rep_cpu, cpu_b_target_khz, g_b_orig_khz,
 					g_b_have_orig, g_b_requested_min_khz);
+				if (cpu_policy_count >= 3)
+					guardian_check_one(cpu_prime_rep_cpu, cpu_prime_target_khz,
+						cpu_policy_orig_khz[2], cpu_policy_have_orig[2],
+						g_prime_requested_min_khz);
 			}
 		}
 		mutex_unlock(&oc_lock);
