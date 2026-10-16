@@ -585,7 +585,8 @@ static int discover_cpu_policy_representatives(void)
 	if (!cpu_policy_count)
 		return -ENODEV;
 	cpu_ll_rep_cpu = low_rep;
-	cpu_b_rep_cpu = high_rep;
+	/* Three-policy layouts are Little/Big/Prime in ascending CPU-policy order. */
+	cpu_b_rep_cpu = (cpu_policy_count >= 3) ? cpu_policy_reps[1] : high_rep;
 	{
 		unsigned int i;
 		size_t off = 0;
@@ -609,6 +610,7 @@ static int discover_cpu_policy_representatives(void)
 
 static unsigned int cpu_ll_target_khz = 0;
 static unsigned int cpu_b_target_khz  = 0;
+static unsigned int cpu_prime_target_khz = 0;
 
 /* Candidate cpufreq-hw LUT voltage; this is not a direct PMIC command. */
 static unsigned int cpu_volt_follow = 1;
@@ -651,6 +653,8 @@ module_param(cpu_ll_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_ll_target_khz, "Little cluster idx0 target freq in KHz (0=leave alone)");
 module_param(cpu_b_target_khz, uint, 0644);
 MODULE_PARM_DESC(cpu_b_target_khz, "Big cluster idx0 target freq in KHz (0=leave alone)");
+module_param(cpu_prime_target_khz, uint, 0644);
+MODULE_PARM_DESC(cpu_prime_target_khz, "Prime cluster idx0 target freq in KHz (active only when three CPU policies are detected; 0=leave alone)");
 
 static char cpu_oc_result[256] = "not applied yet";
 static int cpu_oc_result_get(char *buf, const struct kernel_param *kp)
@@ -853,7 +857,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 {
 	unsigned int trigger;
-	int ret_ll = 0, ret_b = 0;
+	int ret_ll = 0, ret_b = 0, ret_prime = 0;
 
 	if (kstrtouint(val, 10, &trigger))
 		return -EINVAL;
@@ -956,118 +960,40 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 		if (cpu_b_target_khz || g_b_have_orig)
 			ret_b = patch_cluster_idx0(cpu_b_rep_cpu, cpu_b_target_khz,
 				&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
+		if (cpu_policy_count >= 3 && (cpu_prime_target_khz || cpu_policy_have_orig[2]))
+			ret_prime = patch_cluster_idx0(cpu_policy_reps[2], cpu_prime_target_khz,
+				&cpu_policy_orig_khz[2], &cpu_policy_orig_volt[2],
+				&cpu_policy_have_orig[2]);
 	}
 
-	if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW)
+	if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW || ret_prime == -EOVERFLOW)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: LUT voltage exceeded delta/absolute ceiling (ll=%d b=%d, delta=%u, abs=%u)",
 			 ret_ll, ret_b, cpu_volt_max_delta_raw, cpu_volt_abs_max());
-	else if (ret_ll == -ERANGE || ret_b == -ERANGE)
+	else if (ret_ll == -ERANGE || ret_b == -ERANGE || ret_prime == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: target exceeds OC limit (ll=%u b=%u KHz)",
 			 cpu_ll_target_khz, cpu_b_target_khz);
-	else if (ret_ll == -ETIMEDOUT || ret_b == -ETIMEDOUT)
+	else if (ret_ll == -ETIMEDOUT || ret_b == -ETIMEDOUT || ret_prime == -ETIMEDOUT)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: cluster would not leave idx0 within %ums",
 			 QUIESCE_TIMEOUT_US / 1000);
-	else if (ret_ll || ret_b)
+	else if (ret_ll || ret_b || ret_prime)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: CPU apply failed (ret=%d, legacy_b=%d)", ret_ll, ret_b);
+			 "FAIL: CPU apply failed (little=%d big=%d prime=%d)", ret_ll, ret_b, ret_prime);
 	else if (cpu_policy_targets_khz[0])
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "OK: applied targets to %u detected CPU policies", cpu_policy_count);
 	else
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "OK: ll_max=%uKHz b_max=%uKHz (orig ll=%u b=%u)",
+			 "OK: little=%uKHz big=%uKHz prime=%uKHz policies=%u",
 			 cpu_ll_target_khz ? cpu_ll_target_khz : g_ll_orig_khz,
 			 cpu_b_target_khz ? cpu_b_target_khz : g_b_orig_khz,
-			 g_ll_orig_khz, g_b_orig_khz);
+			 (cpu_policy_count >= 3) ? (cpu_prime_target_khz ? cpu_prime_target_khz : cpu_policy_orig_khz[2]) : 0,
+			 cpu_policy_count);
 
 	mutex_unlock(&oc_lock);
 	return 0;
-}
-
-static ssize_t cpu_policy_target_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	struct cpu_policy_target_attr *ta =
-		container_of(attr, struct cpu_policy_target_attr, attr);
-	if (ta->policy_index >= cpu_policy_count)
-		return -ENODEV;
-	return scnprintf(buf, PAGE_SIZE, "%u\n", cpu_policy_targets[ta->policy_index]);
-}
-
-static ssize_t cpu_policy_target_store(struct kobject *kobj,
-		struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	struct cpu_policy_target_attr *ta =
-		container_of(attr, struct cpu_policy_target_attr, attr);
-	unsigned int i = ta->policy_index, target, old_target;
-	int ret;
-
-	if (i >= cpu_policy_count || kstrtouint(buf, 10, &target))
-		return -EINVAL;
-	if (!cpu_policy_discovery_ok || atomic_read(&oc_mt6789_suspended))
-		return -EBUSY;
-	mutex_lock(&oc_lock);
-	old_target = cpu_policy_targets[i];
-	ret = patch_cluster_idx0(cpu_policy_reps[i], target,
-		&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
-		&cpu_policy_have_orig[i]);
-	if (ret) {
-		cpu_policy_targets[i] = old_target;
-		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: %s CPU%u target=%u ret=%d",
-			 cpu_policy_names[i], cpu_policy_reps[i], target, ret);
-		mutex_unlock(&oc_lock);
-		return ret;
-	}
-	cpu_policy_targets[i] = target;
-	snprintf(cpu_oc_result, sizeof(cpu_oc_result), "OK: %s CPU%u target=%u KHz",
-		 cpu_policy_names[i], cpu_policy_reps[i], target);
-	mutex_unlock(&oc_lock);
-	return count;
-}
-
-static int cpu_policy_sysfs_init(void)
-{
-	unsigned int i;
-	int ret;
-
-	if (!cpu_policy_discovery_ok || !cpu_policy_count)
-		return -ENODEV;
-	cpu_policy_kobj = kobject_create_and_add("cpu_policy", kernel_kobj);
-	if (!cpu_policy_kobj)
-		return -ENOMEM;
-	for (i = 0; i < cpu_policy_count; i++) {
-		sysfs_attr_init(&cpu_policy_target_attrs[i].attr.attr);
-		cpu_policy_target_attrs[i].policy_index = i;
-		cpu_policy_target_attrs[i].attr.attr.name = cpu_policy_names[i];
-		cpu_policy_target_attrs[i].attr.attr.mode = 0644;
-		cpu_policy_target_attrs[i].attr.show = cpu_policy_target_show;
-		cpu_policy_target_attrs[i].attr.store = cpu_policy_target_store;
-		cpu_policy_attr_ptrs[i] = &cpu_policy_target_attrs[i].attr.attr;
-		ret = sysfs_create_file(cpu_policy_kobj, cpu_policy_attr_ptrs[i]);
-		if (ret) {
-			while (i > 0)
-				sysfs_remove_file(cpu_policy_kobj, cpu_policy_attr_ptrs[--i]);
-			kobject_put(cpu_policy_kobj);
-			cpu_policy_kobj = NULL;
-			return ret;
-		}
-	}
-	return 0;
-}
-
-static void cpu_policy_sysfs_exit(void)
-{
-	unsigned int i;
-	if (!cpu_policy_kobj)
-		return;
-	for (i = 0; i < cpu_policy_count; i++)
-		sysfs_remove_file(cpu_policy_kobj, cpu_policy_attr_ptrs[i]);
-	kobject_put(cpu_policy_kobj);
-	cpu_policy_kobj = NULL;
 }
 
 static int cpu_oc_apply_get(char *buf, const struct kernel_param *kp)
@@ -1079,7 +1005,7 @@ static const struct kernel_param_ops cpu_oc_apply_ops = {
 	.get = cpu_oc_apply_get,
 };
 module_param_cb(cpu_oc_apply, &cpu_oc_apply_ops, &cpu_oc_apply, 0644);
-MODULE_PARM_DESC(cpu_oc_apply, "Write 1 to apply CPU policy target list or legacy low/high targets");
+MODULE_PARM_DESC(cpu_oc_apply, "Write 1 to apply Little/Big targets and Prime target when a third policy exists");
 
 static int cpu_min_khz_set(unsigned int rep_cpu, unsigned int *requested,
 			   const char *val)
@@ -1437,17 +1363,6 @@ static fn_ski_bottom_t ski_get_bottom;
 static fn_ski_ceiling_t ski_get_ceiling;
 static struct kobject *ski_kobj;
 static struct kobject *cpu_policy_kobj;
-struct cpu_policy_target_attr {
-	struct kobj_attribute attr;
-	unsigned int policy_index;
-};
-static struct cpu_policy_target_attr cpu_policy_target_attrs[MAX_CPU_POLICIES];
-static struct attribute *cpu_policy_attr_ptrs[MAX_CPU_POLICIES + 1];
-static const char * const cpu_policy_names[] = {
-	"little_target_khz", "big_target_khz", "prime_target_khz",
-	"policy3_target_khz", "policy4_target_khz", "policy5_target_khz",
-	"policy6_target_khz", "policy7_target_khz"
-};
 static unsigned int ski_custom_max_khz;
 static unsigned int ski_custom_min_khz;
 
@@ -1955,10 +1870,6 @@ static int __init oc_mt6789_init(void)
 		g_guardian_thread = NULL;
 	}
 
-	ret = cpu_policy_sysfs_init();
-	if (ret)
-		pr_warn("oc_mt6789: CPU policy sysfs setup failed (%d)\n", ret);
-
 	ret = oc_ski_init();
 	if (ret)
 		pr_warn("oc_mt6789: SKI sysfs setup failed (%d)\n", ret);
@@ -1969,7 +1880,6 @@ static int __init oc_mt6789_init(void)
 
 static void __exit oc_mt6789_exit(void)
 {
-	cpu_policy_sysfs_exit();
 	oc_ski_exit();
 	pr_info("overclock_mt6789: unloading\n");
 
