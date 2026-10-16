@@ -525,8 +525,12 @@ static bool cpu_policy_voltage_active[MAX_CPU_POLICIES];
 static unsigned int cpu_ll_rep_cpu = UINT_MAX;
 static unsigned int cpu_b_rep_cpu  = UINT_MAX;
 static char cpu_policy_targets_khz[128];
+/* Runtime-generated list: one representative for every discovered cpufreq policy. */
+static char cpu_policy_representatives[64] = "not detected";
 module_param_string(cpu_policy_targets_khz, cpu_policy_targets_khz, sizeof(cpu_policy_targets_khz), 0644);
 MODULE_PARM_DESC(cpu_policy_targets_khz, "Comma-separated target KHz per detected policy in representative-CPU order; 0 restores stock");
+module_param_string(cpu_policy_representatives, cpu_policy_representatives, sizeof(cpu_policy_representatives), 0444);
+MODULE_PARM_DESC(cpu_policy_representatives, "READ-ONLY: auto-detected representative CPU IDs for every cpufreq policy, in policy order");
 module_param(cpu_ll_rep_cpu, uint, 0444);
 module_param(cpu_b_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
@@ -586,8 +590,19 @@ static int discover_cpu_policy_representatives(void)
 		return -ENODEV;
 	cpu_ll_rep_cpu = low_rep;
 	cpu_b_rep_cpu = high_rep;
+	{
+		unsigned int i;
+		size_t off = 0;
+
+		for (i = 0; i < cpu_policy_count &&
+		     off < sizeof(cpu_policy_representatives) - 1; i++)
+			off += scnprintf(cpu_policy_representatives + off,
+				sizeof(cpu_policy_representatives) - off,
+				"%s%u", i ? "," : "", cpu_policy_reps[i]);
+	}
 	cpu_policy_discovery_ok = true;
-	pr_info("oc_mt6789: auto CPU policy reps: low-policy CPU%u (max=%u KHz), high-policy CPU%u (max=%u KHz)\n",
+	pr_info("oc_mt6789: auto-detected %u CPU policies; representatives=%s (lowest CPU%u max=%u KHz, highest CPU%u max=%u KHz)\n",
+		cpu_policy_count, cpu_policy_representatives,
 		low_rep, low_max, high_rep, high_max);
 	return 0;
 }
