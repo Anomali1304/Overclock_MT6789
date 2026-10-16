@@ -412,6 +412,11 @@ static int gpu_oc_apply_set(const char *val, const struct kernel_param *kpp)
 	if (ret || v != 1)
 		return ret;
 
+	if (!cpu_policy_count || cpu_policy_overflow) {
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result), "FAIL: CPU policy discovery invalid or exceeds limit");
+		return 0;
+	}
+
 	if (atomic_read(&oc_mt6789_suspended)) {
 		snprintf(gpu_oc_result, sizeof(gpu_oc_result), "FAIL: device suspending, refused");
 		gpu_oc_apply = 0;
@@ -514,6 +519,7 @@ struct cpufreq_mtk_mirror {
 #define MAX_CPU_POLICIES 8
 static unsigned int cpu_policy_reps[MAX_CPU_POLICIES];
 static unsigned int cpu_policy_count;
+static bool cpu_policy_overflow;
 static unsigned int cpu_policy_orig_khz[MAX_CPU_POLICIES];
 static unsigned int cpu_policy_orig_volt[MAX_CPU_POLICIES];
 static bool cpu_policy_have_orig[MAX_CPU_POLICIES];
@@ -545,8 +551,12 @@ static int discover_cpu_policy_representatives(void)
 			continue;
 		cpumask_or(&seen, &seen, policy->related_cpus);
 		rep = cpumask_first(&policy->related_cpus);
-		if (rep < nr_cpu_ids && policy->freq_table && cpu_policy_count < MAX_CPU_POLICIES)
-			cpu_policy_reps[cpu_policy_count++] = rep;
+		if (rep < nr_cpu_ids && policy->freq_table) {
+			if (cpu_policy_count < MAX_CPU_POLICIES)
+				cpu_policy_reps[cpu_policy_count++] = rep;
+			else
+				cpu_policy_overflow = true;
+		}
 		if (rep >= nr_cpu_ids || !policy->freq_table) {
 			cpufreq_cpu_put(policy);
 			continue;
@@ -569,6 +579,10 @@ static int discover_cpu_policy_representatives(void)
 		pr_err("oc_mt6789: unable to discover CPU cpufreq policies (low=%u high=%u)\n",
 		       low_rep, high_rep);
 		return -ENODEV;
+	}
+	if (cpu_policy_overflow) {
+		pr_err("oc_mt6789: detected more than %u CPU policies; refusing dynamic CPU OC\n", MAX_CPU_POLICIES);
+		return -E2BIG;
 	}
 	if (!cpu_policy_count)
 		return -ENODEV;
@@ -829,21 +843,45 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 
 	if (cpu_policy_targets_khz[0]) {
 		char targets[sizeof(cpu_policy_targets_khz)], *cursor, *token;
-		unsigned int i = 0;
+		unsigned int parsed[MAX_CPU_POLICIES];
+		unsigned int i = 0, applied = 0;
+		int r = 0;
+
+		/* Parse and validate the entire list before touching any policy. */
 		strlcpy(targets, cpu_policy_targets_khz, sizeof(targets));
 		cursor = targets;
-		while ((token = strsep(&cursor, ",")) != NULL && i < cpu_policy_count) {
-			unsigned int target;
-			int r;
-			if (kstrtouint(strim(token), 10, &target)) { ret_ll = -EINVAL; break; }
-			cpu_policy_targets[i] = target;
-			r = patch_cluster_idx0(cpu_policy_reps[i], target,
-				&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
-				&cpu_policy_have_orig[i]);
-			if (r && !ret_ll) ret_ll = r;
+		while ((token = strsep(&cursor, ",")) != NULL) {
+			if (i >= cpu_policy_count || kstrtouint(strim(token), 10, &parsed[i])) {
+				r = -EINVAL;
+				break;
+			}
 			i++;
 		}
-		if (cursor || i != cpu_policy_count) ret_ll = -EINVAL;
+		if (!r && i != cpu_policy_count)
+			r = -EINVAL;
+
+		if (!r) {
+			for (i = 0; i < cpu_policy_count; i++) {
+				r = patch_cluster_idx0(cpu_policy_reps[i], parsed[i],
+					&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
+					&cpu_policy_have_orig[i]);
+				if (r)
+					break;
+				cpu_policy_targets[i] = parsed[i];
+				applied++;
+			}
+		}
+		if (r) {
+			/* Roll back policies already changed by this request. */
+			while (applied > 0) {
+				unsigned int j = --applied;
+				if (cpu_policy_have_orig[j])
+					patch_cluster_idx0(cpu_policy_reps[j], 0,
+						&cpu_policy_orig_khz[j], &cpu_policy_orig_volt[j],
+						&cpu_policy_have_orig[j]);
+			}
+			ret_ll = r;
+		}
 	} else {
 		if (cpu_ll_target_khz || g_ll_have_orig)
 			ret_ll = patch_cluster_idx0(cpu_ll_rep_cpu, cpu_ll_target_khz,
@@ -867,7 +905,7 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 			 QUIESCE_TIMEOUT_US / 1000);
 	else if (ret_ll || ret_b)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: ll=%d b=%d", ret_ll, ret_b);
+			 "FAIL: CPU apply failed (ret=%d, legacy_b=%d)", ret_ll, ret_b);
 	else if (cpu_policy_targets_khz[0])
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "OK: applied targets to %u detected CPU policies", cpu_policy_count);
@@ -891,7 +929,7 @@ static const struct kernel_param_ops cpu_oc_apply_ops = {
 	.get = cpu_oc_apply_get,
 };
 module_param_cb(cpu_oc_apply, &cpu_oc_apply_ops, &cpu_oc_apply, 0644);
-MODULE_PARM_DESC(cpu_oc_apply, "Write 1 to apply cpu_ll_target_khz/cpu_b_target_khz to idx0");
+MODULE_PARM_DESC(cpu_oc_apply, "Write 1 to apply CPU policy target list or legacy low/high targets");
 
 static int cpu_min_khz_set(unsigned int rep_cpu, unsigned int *requested,
 			   const char *val)
