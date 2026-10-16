@@ -1098,7 +1098,7 @@ static int cpu_prime_min_khz_set(const char *val, const struct kernel_param *kp)
 static int cpu_prime_min_khz_get(char *buf, const struct kernel_param *kp)
 {
 	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
-		return scnprintf(buf, PAGE_SIZE, "0\\n");
+		return scnprintf(buf, PAGE_SIZE, "0\n");
 	return cpu_min_khz_get(cpu_prime_rep_cpu, g_prime_requested_min_khz, buf);
 }
 static const struct kernel_param_ops cpu_prime_min_khz_ops = {
