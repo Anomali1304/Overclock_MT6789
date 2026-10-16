@@ -846,8 +846,16 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 	if (cpu_policy_targets_khz[0]) {
 		char targets[sizeof(cpu_policy_targets_khz)], *cursor, *token;
 		unsigned int parsed[MAX_CPU_POLICIES];
+		unsigned int previous_targets[MAX_CPU_POLICIES];
+		bool previous_active[MAX_CPU_POLICIES];
 		unsigned int i = 0, applied = 0;
 		int r = 0;
+
+		for (i = 0; i < cpu_policy_count; i++) {
+			previous_targets[i] = cpu_policy_targets[i];
+			previous_active[i] = cpu_policy_have_orig[i];
+		}
+		i = 0;
 
 		/* Parse and validate the entire list before touching any policy. */
 		strlcpy(targets, cpu_policy_targets_khz, sizeof(targets));
@@ -877,10 +885,13 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 			/* Roll back policies already changed by this request. */
 			while (applied > 0) {
 				unsigned int j = --applied;
-				if (cpu_policy_have_orig[j])
-					patch_cluster_idx0(cpu_policy_reps[j], 0,
+				if (cpu_policy_have_orig[j]) {
+					unsigned int rollback_target = previous_active[j] ?
+						previous_targets[j] : 0;
+					patch_cluster_idx0(cpu_policy_reps[j], rollback_target,
 						&cpu_policy_orig_khz[j], &cpu_policy_orig_volt[j],
 						&cpu_policy_have_orig[j]);
+				}
 			}
 			ret_ll = r;
 		}
