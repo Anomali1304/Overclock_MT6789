@@ -868,6 +868,9 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 	else if (ret_ll || ret_b)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: ll=%d b=%d", ret_ll, ret_b);
+	else if (cpu_policy_targets_khz[0])
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "OK: applied targets to %u detected CPU policies", cpu_policy_count);
 	else
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "OK: ll_max=%uKHz b_max=%uKHz (orig ll=%u b=%u)",
