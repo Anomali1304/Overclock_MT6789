@@ -532,28 +532,6 @@ module_param(cpu_b_rep_cpu, uint, 0444);
 MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
 MODULE_PARM_DESC(cpu_b_rep_cpu, "Auto-discovered representative CPU# for highest-frequency policy");
 
-/*
- * The module loader creates parameter files after init returns. Suppress the
- * Prime parameter before that setup when the detected DTB has fewer than
- * three CPU policies.
- */
-static void cpu_prime_param_visibility_init(void)
-{
-	unsigned int i;
-
-	if (cpu_policy_count >= 3)
-		return;
-	for (i = 0; i < THIS_MODULE->num_kp; i++) {
-		if (!strcmp(THIS_MODULE->kp[i].name, "cpu_prime_target_khz")) {
-			THIS_MODULE->kp[i].perm = 0;
-			pr_info("oc_mt6789: Prime target parameter hidden (%u CPU policies detected)\n",
-				cpu_policy_count);
-			return;
-		}
-	}
-	pr_warn("oc_mt6789: Prime target parameter not found in module parameter table\n");
-}
-
 static int discover_cpu_policy_representatives(void)
 {
 	struct cpufreq_policy *policy;
@@ -1803,7 +1781,6 @@ static int __init oc_mt6789_init(void)
 	ret = discover_cpu_policy_representatives();
 	if (ret)
 		pr_warn("oc_mt6789: CPU policy auto-discovery failed; CPU OC apply will fail safely until policies are available\n");
-	cpu_prime_param_visibility_init();
 
 	pr_info("overclock_mt6789: init (GPU working_table patch + CPU cpufreq-hw LUT patch)\n");
 	pr_info("oc_mt6789: CPU safety cap = stock +%d%%, %uMHz absolute ceiling (whichever is lower); raise in small steps and stress-test between each\n",
