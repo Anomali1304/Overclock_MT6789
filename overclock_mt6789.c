@@ -505,12 +505,61 @@ struct cpufreq_mtk_mirror {
 	cpumask_t related_cpus;
 };
 
-static unsigned int cpu_ll_rep_cpu = 0;
-static unsigned int cpu_b_rep_cpu  = 6;
+/*
+ * Representative CPUs are discovered from live cpufreq policies at module
+ * init; CPU numbers are not assumed to be 0/4/6. The current control ABI has
+ * two CPU targets (little/big), so choose the lowest- and highest-frequency
+ * policies when the platform exposes more than two policies.
+ */
+static unsigned int cpu_ll_rep_cpu = UINT_MAX;
+static unsigned int cpu_b_rep_cpu  = UINT_MAX;
 module_param(cpu_ll_rep_cpu, uint, 0444);
 module_param(cpu_b_rep_cpu, uint, 0444);
-MODULE_PARM_DESC(cpu_ll_rep_cpu, "Representative CPU# for little cluster domain");
-MODULE_PARM_DESC(cpu_b_rep_cpu, "Representative CPU# for big cluster domain");
+MODULE_PARM_DESC(cpu_ll_rep_cpu, "Auto-discovered representative CPU# for lowest-frequency policy");
+MODULE_PARM_DESC(cpu_b_rep_cpu, "Auto-discovered representative CPU# for highest-frequency policy");
+
+static int discover_cpu_policy_representatives(void)
+{
+	struct cpufreq_policy *policy;
+	unsigned int cpu, rep, low_rep = UINT_MAX, high_rep = UINT_MAX;
+	unsigned int low_max = UINT_MAX, high_max = 0;
+	cpumask_t seen;
+
+	cpumask_clear(&seen);
+	for_each_possible_cpu(cpu) {
+		if (cpumask_test_cpu(cpu, &seen))
+			continue;
+		policy = cpufreq_cpu_get(cpu);
+		if (!policy)
+			continue;
+		cpumask_or(&seen, &seen, policy->related_cpus);
+		rep = cpumask_first(&policy->related_cpus);
+		if (rep >= nr_cpu_ids || !policy->freq_table) {
+			cpufreq_cpu_put(policy);
+			continue;
+		}
+		if (policy->max && policy->max < low_max) {
+			low_max = policy->max;
+			low_rep = rep;
+		}
+		if (policy->max > high_max) {
+			high_max = policy->max;
+			high_rep = rep;
+		}
+		cpufreq_cpu_put(policy);
+	}
+
+	if (low_rep == UINT_MAX || high_rep == UINT_MAX) {
+		pr_err("oc_mt6789: unable to discover CPU cpufreq policies (low=%u high=%u)\n",
+		       low_rep, high_rep);
+		return -ENODEV;
+	}
+	cpu_ll_rep_cpu = low_rep;
+	cpu_b_rep_cpu = high_rep;
+	pr_info("oc_mt6789: auto CPU policy reps: low-policy CPU%u (max=%u KHz), high-policy CPU%u (max=%u KHz)\n",
+		low_rep, low_max, high_rep, high_max);
+	return 0;
+}
 
 #define MAX_OC_PERCENT_OVER_STOCK  60
 
@@ -1555,6 +1604,10 @@ static int __init oc_mt6789_init(void)
 {
 	unsigned long addr;
 	int ret;
+
+	ret = discover_cpu_policy_representatives();
+	if (ret)
+		pr_warn("oc_mt6789: CPU policy auto-discovery failed; CPU OC apply will fail safely until policies are available\n");
 
 	pr_info("overclock_mt6789: init (GPU working_table patch + CPU cpufreq-hw LUT patch)\n");
 	pr_info("oc_mt6789: CPU safety cap = stock +%d%%, %uMHz absolute ceiling (whichever is lower); raise in small steps and stress-test between each\n",
