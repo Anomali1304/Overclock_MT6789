@@ -1226,6 +1226,26 @@ static void guardian_check_one(unsigned int rep_cpu, unsigned int target_khz,
 	struct cpufreq_policy *policy;
 	unsigned int min_khz;
 
+	int policy_idx = cpu_policy_index(rep_cpu);
+	bool voltage_guard_active = false;
+
+	/* Do not touch cpufreq policy locks when no guard is configured.
+	 * The guardian thread runs even with OC disabled; keep the idle path
+	 * completely passive unless an OC target, min-frequency request, or
+	 * active voltage-follow guard actually needs reassertion.
+	 */
+	if (cpu_volt_reassert) {
+		if (policy_idx >= 0)
+			voltage_guard_active = cpu_policy_voltage_active[policy_idx];
+		else if (rep_cpu == cpu_ll_rep_cpu)
+			voltage_guard_active = g_ll_voltage_active;
+		else if (rep_cpu == cpu_b_rep_cpu)
+			voltage_guard_active = g_b_voltage_active;
+	}
+	if (!(have_orig && target_khz) && !requested_min &&
+	    !voltage_guard_active)
+		return;
+
 	/* Kept in the signature for compatibility with the existing call path. */
 	(void)orig_khz;
 
