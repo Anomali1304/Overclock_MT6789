@@ -588,9 +588,45 @@ static int discover_cpu_policy_representatives(void)
 	if (!cpu_policy_count)
 		return -ENODEV;
 	cpu_ll_rep_cpu = low_rep;
-	/* Three-policy layouts are Little/Big/Prime in ascending CPU-policy order. */
-	cpu_b_rep_cpu = (cpu_policy_count >= 3) ? cpu_policy_reps[1] : high_rep;
-	cpu_prime_rep_cpu = (cpu_policy_count >= 3) ? cpu_policy_reps[2] : UINT_MAX;
+	/*
+	 * Classify aliases by policy frequency limits, not discovery order.
+	 * CPU IDs and cpufreq policy numbering are not guaranteed to encode
+	 * Little/Big/Prime order. Prime is the highest-max policy; Big is the
+	 * remaining policy between Little and Prime.
+	 */
+	cpu_b_rep_cpu = high_rep;
+	cpu_prime_rep_cpu = UINT_MAX;
+	if (cpu_policy_count >= 3) {
+		unsigned int i;
+		bool found_middle = false;
+
+		for (i = 0; i < cpu_policy_count; i++) {
+			struct cpufreq_policy *p;
+			unsigned int candidate, max_freq;
+
+			candidate = cpu_policy_reps[i];
+			if (candidate == low_rep || candidate == high_rep)
+				continue;
+
+			p = cpufreq_cpu_get(candidate);
+			if (!p)
+				continue;
+			max_freq = p->cpuinfo.max_freq ?
+				   p->cpuinfo.max_freq : p->max;
+			cpufreq_cpu_put(p);
+			if (max_freq > low_max && max_freq < high_max) {
+				cpu_b_rep_cpu = candidate;
+				found_middle = true;
+				break;
+			}
+		}
+		if (!found_middle) {
+			pr_err("oc_mt6789: unable to map middle-frequency CPU policy; refusing ambiguous Little/Big/Prime aliases\n");
+			cpu_policy_count = 0;
+			return -ENODEV;
+		}
+		cpu_prime_rep_cpu = high_rep;
+	}
 	{
 		unsigned int i;
 		size_t off = 0;
