@@ -665,9 +665,8 @@ static int cpu_prime_target_set(const char *val, const struct kernel_param *kp)
 	unsigned int value;
 	int ret;
 
-	if (!cpu_policy_discovery_ok || cpu_policy_overflow)
-		return -EAGAIN;
-	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
+	if (cpu_policy_discovery_ok &&
+	    (cpu_policy_overflow || cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX))
 		return -ENODEV;
 	ret = kstrtouint(val, 0, &value);
 	if (ret)
@@ -696,9 +695,8 @@ static int cpu_prime_volt_set(const char *val, const struct kernel_param *kp)
 	unsigned int value;
 	int ret;
 
-	if (!cpu_policy_discovery_ok || cpu_policy_overflow)
-		return -EAGAIN;
-	if (cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX)
+	if (cpu_policy_discovery_ok &&
+	    (cpu_policy_overflow || cpu_policy_count < 3 || cpu_prime_rep_cpu == UINT_MAX))
 		return -ENODEV;
 	ret = kstrtouint(val, 0, &value);
 	if (ret)
@@ -1159,9 +1157,17 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 	else if (ret_ll || ret_b || ret_prime)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: CPU apply failed (little=%d big=%d prime=%d)", ret_ll, ret_b, ret_prime);
-	else
+	else if (cpu_policy_targets_khz[0])
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "OK: applied %u policy targets in representative-CPU order",
+			 cpu_policy_count);
+	else
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "OK: little=%uKHz big=%uKHz prime=%uKHz policies=%u",
+			 g_ll_applied_target_khz ? g_ll_applied_target_khz : g_ll_orig_khz,
+			 g_b_applied_target_khz ? g_b_applied_target_khz : g_b_orig_khz,
+			 (cpu_policy_count >= 3) ?
+			 (g_prime_applied_target_khz ? g_prime_applied_target_khz : cpu_policy_orig_khz[2]) : 0,
 			 cpu_policy_count);
 
 	mutex_unlock(&oc_lock);
@@ -2014,8 +2020,9 @@ static int __init oc_mt6789_init(void)
 		pr_warn("oc_mt6789: CPU policy auto-discovery failed; CPU OC apply will fail safely until policies are available\n");
 
 	pr_info("overclock_mt6789: init (GPU working_table patch + CPU cpufreq-hw LUT patch)\n");
-	pr_info("oc_mt6789: CPU safety cap = stock +%d%%, %uMHz absolute ceiling (whichever is lower); raise in small steps and stress-test between each\n",
-		MAX_OC_PERCENT_OVER_STOCK, MAX_OC_ABSOLUTE_KHZ / 1000);
+	pr_info("oc_mt6789: CPU cap = stock +%d%%, %uMHz absolute; targets above %uMHz require cpu_oc_allow_3ghz=1\n",
+		MAX_OC_PERCENT_OVER_STOCK, MAX_OC_ABSOLUTE_KHZ / 1000,
+		MAX_OC_KNOWN_HANG_KHZ / 1000);
 
 	ret = register_pm_notifier(&oc_mt6789_pm_nb);
 	if (ret)
