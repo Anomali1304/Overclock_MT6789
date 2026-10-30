@@ -194,7 +194,7 @@ This kernel enforces `CONFIG_CFI_CLANG`. Every function reached through a `kalls
 
 ### What the module already checks
 
-The CPU path validates the target against the stock-frequency-derived limit and the absolute 2600 MHz ceiling, and verifies that the cluster leaves idx0 before modifying the live LUT row. The GPU PLL path uses the MediaTek frequency-hopping function for the PCW transition and never writes the PLL target synchronously from the apply parameter handler.
+The CPU path validates targets against the stock-frequency-derived limit and the 3000 MHz absolute ceiling. Targets above 2600 MHz require the explicit `cpu_oc_allow_3ghz=1` opt-in. It verifies that the cluster leaves idx0 and checks MMIO readback before accepting a LUT update. The GPU PLL path uses the MediaTek frequency-hopping function for the PCW transition and never writes the PLL target synchronously from the apply parameter handler.
 
 None of that makes a wrong target, an incompatible kernel tree, or a vendor-driver change safe to try blind. Test changes incrementally and keep a known-good kernel available.
 
@@ -208,15 +208,16 @@ The module must be compiled with the same Clang toolchain as the kernel — espe
 
 ## Experimental CPU LUT voltage follow
 
-Branch `cpu-voltage-follow-port` adds an **experimental candidate voltage-field write** to the CPU cpufreq-hw LUT. This is not a direct PMIC API and does not guarantee that the physical CPU rail follows the requested value.
+The CPU voltage-follow path performs an **experimental candidate voltage-field write** to the CPU cpufreq-hw LUT. This is not a direct PMIC API and does not guarantee that the physical CPU rail follows the requested value.
 
 Parameters are under `/sys/module/overclock_mt6789/parameters/`:
 
 | Parameter | Meaning |
 | --- | --- |
 | `cpu_volt_follow` | Default `1`: derive a candidate idx0 LUT voltage when the target exceeds stock. Set `0` for frequency-only unless an explicit voltage is configured. |
-| `cpu_ll_volt_raw` | Optional explicit A55 (CPU0-5) idx0 voltage; `0` uses the slope derived from LUT rows 1 and 3. |
-| `cpu_b_volt_raw` | Optional explicit A76 (CPU6-7) idx0 voltage; `0` uses the slope derived from LUT rows 1 and 3. |
+| `cpu_little_volt_raw` | Optional explicit Little-policy idx0 voltage; `0` uses the slope derived from LUT rows 1 and 3. |
+| `cpu_big_volt_raw` | Optional explicit Big-policy idx0 voltage; `0` uses the slope derived from LUT rows 1 and 3. |
+| `cpu_prime_volt_raw` | Optional explicit third-policy idx0 voltage; available only when a third policy is detected. |
 | `cpu_volt_max_delta_raw` | Maximum increase over the captured stock idx0 value; default `20000` (= 200 mV in the project's raw-unit convention). |
 | `cpu_volt_abs_max_raw` | Final candidate ceiling; default `112000` (= 1.12 V), hard-clamped at `115000` (= 1.15 V). |
 | `cpu_volt_reassert` | Default `1`: guardian checks the idx0 LUT voltage every 50 ms and rewrites only that field if it changes. |
@@ -229,16 +230,16 @@ P=/sys/module/overclock_mt6789/parameters
 cat "$P/cpu_lut_table"
 echo 20000 > "$P/cpu_volt_max_delta_raw"
 echo 112000 > "$P/cpu_volt_abs_max_raw"
-echo 0 > "$P/cpu_ll_volt_raw"   # A55: auto slope
-echo 0 > "$P/cpu_b_volt_raw"    # A76: auto slope
-echo 2400000 > "$P/cpu_ll_target_khz"
-echo 2500000 > "$P/cpu_b_target_khz"
+echo 0 > "$P/cpu_little_volt_raw"   # first policy: auto slope
+echo 0 > "$P/cpu_big_volt_raw"      # second policy: auto slope
+echo 2400000 > "$P/cpu_little_target_khz"
+echo 2500000 > "$P/cpu_big_target_khz"
 echo 1 > "$P/cpu_oc_apply"
 cat "$P/cpu_oc_result"
 cat "$P/cpu_lut_table"
 ```
 
-Voltage raw values use the source project's `mV*100` convention, rounded upward to a 625-raw step. Explicit values cannot request less than the captured stock idx0 voltage. The module rejects a request that exceeds either voltage limit before writing the LUT.
+Voltage raw values use the source project's `mV*100` convention, rounded upward to a 625-raw step. Explicit values cannot request less than the captured stock idx0 voltage. When voltage follow is enabled, the module rejects missing/invalid slope data and requests that exceed either voltage limit before writing the LUT. Setting `cpu_volt_follow=0` explicitly selects frequency-only behavior unless an explicit voltage override is supplied.
 
 **Hardware caveats:** `LUT_VOLT = bits[28:12]` is inferred from MT6789 LUT/EEM correlation, not an official register contract. EEM/SVS may rewrite this field, which is why reassertion is optional. Reasserting a LUT field is not proof that the PMIC/MCUPM rail changed. The supplied reference project's on-device observations reported A55 rail response but no corresponding A76 rail response; treat A76 as frequency-only unless actual rail telemetry on this exact device proves otherwise. Do not treat the example frequencies or voltages as stable recommendations. Verify stock LUT values, live readback, EEM reports, rail telemetry and stress stability on-device; keep a known-good boot image.
 
