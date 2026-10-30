@@ -1410,9 +1410,9 @@ static int guardian_thread_fn(void *unused)
 		mutex_lock(&oc_lock);
 		{
 			unsigned int i;
-			bool dynamic_active = false;
-			for (i = 0; i < cpu_policy_count; i++)
-				if (cpu_policy_have_orig[i]) dynamic_active = true;
+			/* The Prime alias also uses cpu_policy_have_orig[2]; that alone
+			 * must not switch the Little/Big/Prime path into all-policy mode. */
+			bool dynamic_active = cpu_policy_targets_khz[0] != '\0';
 			if (dynamic_active) {
 				for (i = 0; i < cpu_policy_count; i++)
 					guardian_check_one(cpu_policy_reps[i], cpu_policy_targets[i],
