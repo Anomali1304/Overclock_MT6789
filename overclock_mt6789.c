@@ -532,7 +532,7 @@ static bool cpu_policy_voltage_active[MAX_CPU_POLICIES];
 static unsigned int cpu_ll_rep_cpu = UINT_MAX;
 static unsigned int cpu_b_rep_cpu  = UINT_MAX;
 static unsigned int cpu_prime_rep_cpu = UINT_MAX;
-/* Internal legacy buffer; no module parameter is exported for the list. */
+/* Optional all-policy target list, ordered by representative CPU. */
 static char cpu_policy_targets_khz[128];
 static char cpu_policy_representatives[64] = "not detected";
 module_param_string(cpu_policy_targets_khz, cpu_policy_targets_khz,
@@ -886,6 +886,11 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	else
 		override_volt = 0; /* Other policies derive voltage from their own LUT slope. */
 	new_volt = *orig_volt;
+	if (use_khz > MAX_OC_KNOWN_HANG_KHZ && !cpu_volt_follow && !override_volt) {
+		pr_err("oc_mt6789: cpu%u >2.6GHz requires voltage-follow or an explicit LUT voltage\n", rep_cpu);
+		cpufreq_cpu_put(policy);
+		return -EINVAL;
+	}
 	if (use_khz > *orig_khz && (cpu_volt_follow || override_volt)) {
 		if (override_volt) {
 			if (override_volt > CPU_VOLT_ABS_HARD_MAX) {
@@ -917,6 +922,11 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 			pr_err("oc_mt6789: cpu%u has fewer than 4 OPPs; refusing voltage-follow OC\n", rep_cpu);
 			cpufreq_cpu_put(policy);
 			return -ENODATA;
+		}
+		if (use_khz > MAX_OC_KNOWN_HANG_KHZ && new_volt <= *orig_volt) {
+			pr_err("oc_mt6789: cpu%u >2.6GHz request did not produce a higher candidate LUT voltage\n", rep_cpu);
+			cpufreq_cpu_put(policy);
+			return -EINVAL;
 		}
 		if (new_volt - *orig_volt > cpu_volt_max_delta_raw ||
 		    new_volt > cpu_volt_abs_max()) {
