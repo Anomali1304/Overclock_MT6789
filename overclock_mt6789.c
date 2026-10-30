@@ -204,7 +204,7 @@ static __nocfi void gpu_pll_work_fn(struct work_struct *work)
 {
 	struct gpufreq_opp_info *wt;
 	unsigned int freq_old, freq_new;
-	int idx;
+	int idx, n;
 
 	if (atomic_read(&oc_mt6789_suspended))
 		return;
@@ -215,6 +215,9 @@ static __nocfi void gpu_pll_work_fn(struct work_struct *work)
 	if (idx < 0 || idx >= GPU_OPP_MAX || !g_gpu_patched[idx])
 		return;
 
+	n = sym_gpufreq_get_opp_num ? sym_gpufreq_get_opp_num(TARGET_GPU) : 0;
+	if (n <= 0 || idx >= n)
+		return;
 	wt = (struct gpufreq_opp_info *)sym_gpufreq_get_working_table(TARGET_GPU);
 	if (!wt)
 		return;
@@ -397,11 +400,14 @@ static int lazy_map_hw(void)
 		return 0;
 
 	g_apmixed_va = ioremap(APMIXED_PHYS, APMIXED_SIZE);
-	if (!g_apmixed_va)
+	if (!g_apmixed_va) {
+		g_hw_mapped = false;
 		pr_warn("oc_mt6789: apmixed ioremap failed -> GPU PLL write disabled\n");
+		return -ENODEV;
+	}
 
 	g_hw_mapped = true;
-	return g_apmixed_va ? 0 : -ENODEV;
+	return 0;
 }
 
 static int gpu_oc_apply_set(const char *val, const struct kernel_param *kpp)
@@ -420,16 +426,17 @@ static int gpu_oc_apply_set(const char *val, const struct kernel_param *kpp)
 
 	mutex_lock(&oc_lock);
 
-	if (lazy_map_hw() < 0) {
-		snprintf(gpu_oc_result, sizeof(gpu_oc_result), "FAIL: hardware mapping failed");
-		goto out;
-	}
-
+	/* Stock restoration only needs the OPP symbols, not an APMIXED mapping. */
 	if (gpu_target_khz == 0) {
 		cancel_delayed_work_sync(&g_gpu_pll_work);
 		gpu_restore_working_table();
 		g_gpu_oc_active = false;
 		snprintf(gpu_oc_result, sizeof(gpu_oc_result), "OK: GPU OC disabled, stock restored");
+		goto out;
+	}
+
+	if (lazy_map_hw() < 0) {
+		snprintf(gpu_oc_result, sizeof(gpu_oc_result), "FAIL: hardware mapping failed");
 		goto out;
 	}
 
@@ -1286,7 +1293,7 @@ static void guardian_reassert_voltage(struct cpufreq_policy *policy,
 	int policy_idx = cpu_policy_index(rep_cpu);
 	u32 raw;
 
-	if (!cpu_volt_reassert || !c)
+	if (!cpu_volt_reassert || !c || !c->reg_bases[REG_FREQ_LUT_TABLE])
 		return;
 	if (policy_idx >= 0) {
 		if (!cpu_policy_voltage_active[policy_idx])
@@ -1440,6 +1447,13 @@ static void dump_one_cpu(int cpu, char *buf, size_t *off, size_t bufsize,
 	(*n_seen)++;
 
 	c = (struct cpufreq_mtk_mirror *)policy->driver_data;
+	if (!c || !c->reg_bases[REG_FREQ_PERF_STATE] ||
+	    !c->reg_bases[REG_FREQ_LUT_TABLE] || c->nr_opp <= 0) {
+		*off += scnprintf(buf + *off, bufsize - *off,
+			"cpu%d: invalid MTK cpufreq MMIO metadata\n", cpu);
+		cpufreq_cpu_put(policy);
+		return;
+	}
 	cur_idx = readl_relaxed(c->reg_bases[REG_FREQ_PERF_STATE]);
 
 	*off += scnprintf(buf + *off, bufsize - *off,
