@@ -783,7 +783,9 @@ static int quiesce_off_idx0(struct cpufreq_policy *policy, struct cpufreq_mtk_mi
 	unsigned int waited_us = 0;
 	int ret;
 
-	if (c->nr_opp < 2)
+	if (!policy || !c || !qos_req || !policy->freq_table ||
+	    !c->reg_bases[REG_FREQ_PERF_STATE] || c->nr_opp < 2 ||
+	    !policy->freq_table[1].frequency)
 		return -ENODATA;
 
 	ret = freq_qos_add_request(&policy->constraints, qos_req, FREQ_QOS_MAX,
@@ -886,6 +888,12 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	new_volt = *orig_volt;
 	if (use_khz > *orig_khz && (cpu_volt_follow || override_volt)) {
 		if (override_volt) {
+			if (override_volt > CPU_VOLT_ABS_HARD_MAX) {
+				pr_err("oc_mt6789: cpu%u explicit LUT voltage %u exceeds hard limit %u\n",
+				       rep_cpu, override_volt, CPU_VOLT_ABS_HARD_MAX);
+				cpufreq_cpu_put(policy);
+				return -EOVERFLOW;
+			}
 			new_volt = DIV_ROUND_UP(override_volt, CPU_VOLT_STEP_RAW) *
 				   CPU_VOLT_STEP_RAW;
 			if (new_volt < *orig_volt)
