@@ -621,8 +621,14 @@ static int discover_cpu_policy_representatives(void)
 }
 
 #define MAX_OC_PERCENT_OVER_STOCK  100
+#define MAX_OC_KNOWN_HANG_KHZ      2600000U
+#define MAX_OC_ABSOLUTE_KHZ        3000000U
 
-#define MAX_OC_ABSOLUTE_KHZ  3000000U
+/* Explicit opt-in required above the previously tested 2.6GHz ceiling. */
+static unsigned int cpu_oc_allow_3ghz;
+module_param(cpu_oc_allow_3ghz, uint, 0644);
+MODULE_PARM_DESC(cpu_oc_allow_3ghz,
+	"Set to 1 to permit experimental CPU targets above 2.6GHz up to 3.0GHz; higher clocks are known to hang on this device");
 
 static unsigned int cpu_ll_target_khz = 0; /* exposed as cpu_little_target_khz */
 static unsigned int cpu_b_target_khz  = 0; /* exposed as cpu_big_target_khz */
@@ -754,6 +760,8 @@ MODULE_PARM_DESC(cpu_oc_result, "CPU OC status (read-only)");
 static unsigned int g_ll_orig_khz, g_b_orig_khz;
 static unsigned int g_ll_orig_volt, g_b_orig_volt;
 static bool         g_ll_have_orig, g_b_have_orig;
+static unsigned int g_ll_applied_target_khz, g_b_applied_target_khz;
+static unsigned int g_prime_applied_target_khz;
 
 static unsigned int cpu_volt_abs_max(void)
 {
@@ -852,6 +860,10 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		if (target_khz > cap_khz) {
 			cpufreq_cpu_put(policy);
 			return -ERANGE;
+		}
+		if (target_khz > MAX_OC_KNOWN_HANG_KHZ && !cpu_oc_allow_3ghz) {
+			cpufreq_cpu_put(policy);
+			return -EPERM;
 		}
 		use_khz = target_khz;
 	}
@@ -1067,22 +1079,68 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 			ret_ll = r;
 		}
 	} else {
-		if (cpu_ll_target_khz || g_ll_have_orig)
+		unsigned int prev_ll = g_ll_applied_target_khz;
+		unsigned int prev_b = g_b_applied_target_khz;
+		unsigned int prev_prime = g_prime_applied_target_khz;
+		bool tried_ll = false, tried_b = false, tried_prime = false;
+
+		if (cpu_ll_target_khz || g_ll_have_orig) {
+			tried_ll = true;
 			ret_ll = patch_cluster_idx0(cpu_ll_rep_cpu, cpu_ll_target_khz,
 				&g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig);
-		if (cpu_b_target_khz || g_b_have_orig)
+			if (!ret_ll)
+				g_ll_applied_target_khz = cpu_ll_target_khz;
+		}
+		if (cpu_b_target_khz || g_b_have_orig) {
+			tried_b = true;
 			ret_b = patch_cluster_idx0(cpu_b_rep_cpu, cpu_b_target_khz,
 				&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
-		if (cpu_policy_count >= 3 && (cpu_prime_target_khz || cpu_policy_have_orig[2]))
+			if (!ret_b)
+				g_b_applied_target_khz = cpu_b_target_khz;
+		}
+		if (cpu_policy_count >= 3 && (cpu_prime_target_khz || cpu_policy_have_orig[2])) {
+			tried_prime = true;
 			ret_prime = patch_cluster_idx0(cpu_policy_reps[2], cpu_prime_target_khz,
 				&cpu_policy_orig_khz[2], &cpu_policy_orig_volt[2],
 				&cpu_policy_have_orig[2]);
+			if (!ret_prime)
+				g_prime_applied_target_khz = cpu_prime_target_khz;
+		}
+
+		/* Keep the legacy Little/Big/Prime apply path transactional. */
+		if (ret_ll || ret_b || ret_prime) {
+			if (tried_prime && !ret_prime) {
+				if (patch_cluster_idx0(cpu_policy_reps[2], prev_prime,
+					&cpu_policy_orig_khz[2], &cpu_policy_orig_volt[2],
+					&cpu_policy_have_orig[2]))
+					pr_err("oc_mt6789: Prime rollback failed\n");
+				else
+					g_prime_applied_target_khz = prev_prime;
+			}
+			if (tried_b && !ret_b) {
+				if (patch_cluster_idx0(cpu_b_rep_cpu, prev_b,
+					&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig))
+					pr_err("oc_mt6789: Big rollback failed\n");
+				else
+					g_b_applied_target_khz = prev_b;
+			}
+			if (tried_ll && !ret_ll) {
+				if (patch_cluster_idx0(cpu_ll_rep_cpu, prev_ll,
+					&g_ll_orig_khz, &g_ll_orig_volt, &g_ll_have_orig))
+					pr_err("oc_mt6789: Little rollback failed\n");
+				else
+					g_ll_applied_target_khz = prev_ll;
+			}
+		}
 	}
 
 	if (ret_ll == -EOVERFLOW || ret_b == -EOVERFLOW || ret_prime == -EOVERFLOW)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: LUT voltage exceeded delta/absolute ceiling (little=%d big=%d prime=%d, delta=%u, abs=%u)",
 			 ret_ll, ret_b, ret_prime, cpu_volt_max_delta_raw, cpu_volt_abs_max());
+	else if (ret_ll == -EPERM || ret_b == -EPERM || ret_prime == -EPERM)
+		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
+			 "FAIL: target above 2.6GHz requires cpu_oc_allow_3ghz=1 (experimental; max 3.0GHz)");
 	else if (ret_ll == -ERANGE || ret_b == -ERANGE || ret_prime == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: target exceeds OC limit (little=%u big=%u prime=%u KHz)",
@@ -1332,12 +1390,12 @@ static int guardian_thread_fn(void *unused)
 						(i == 1 ? g_b_requested_min_khz :
 						(i == 2 ? g_prime_requested_min_khz : 0)));
 			} else {
-				guardian_check_one(cpu_ll_rep_cpu, cpu_ll_target_khz, g_ll_orig_khz,
+				guardian_check_one(cpu_ll_rep_cpu, g_ll_applied_target_khz, g_ll_orig_khz,
 					g_ll_have_orig, g_ll_requested_min_khz);
-				guardian_check_one(cpu_b_rep_cpu, cpu_b_target_khz, g_b_orig_khz,
+				guardian_check_one(cpu_b_rep_cpu, g_b_applied_target_khz, g_b_orig_khz,
 					g_b_have_orig, g_b_requested_min_khz);
 				if (cpu_policy_count >= 3)
-					guardian_check_one(cpu_prime_rep_cpu, cpu_prime_target_khz,
+					guardian_check_one(cpu_prime_rep_cpu, g_prime_applied_target_khz,
 						cpu_policy_orig_khz[2], cpu_policy_have_orig[2],
 						g_prime_requested_min_khz);
 			}
