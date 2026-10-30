@@ -30,10 +30,7 @@ GPU frequency is limited to `1750000 KHz`. GPU voltage and VSRAM are limited to 
 
 ### CPU
 
-The CPU path targets the top cpufreq entry (`idx0`) for two domains:
-
-- Little cluster: representative CPU `0`
-- Big cluster: representative CPU `6`
+The CPU path discovers all available cpufreq policies at module load and uses the first CPU in each policy's `related_cpus` mask as its representative. Policies are kept in ascending representative-CPU order. The first three are exposed as Little, Big, and Prime aliases; the dynamic path supports up to `MAX_CPU_POLICIES` policies.
 
 For each domain the module updates:
 
@@ -48,11 +45,13 @@ Before modifying a live LUT row, the module temporarily caps the policy to the n
 CPU targets are limited to the lower of:
 
 ```text
-stock_idx0 + 60%
-2600000 KHz
+stock_idx0 + 100%
+3000000 KHz
 ```
 
-That ceiling isn't an arbitrary safety margin — `2610000 KHz` and above is confirmed to hang on this hardware. A target of `0` restores the saved stock idx0 frequency.
+Targets above `2600000 KHz` are refused by default. Set `cpu_oc_allow_3ghz=1` to opt in to the experimental `2601000..3000000 KHz` range. This is deliberately disabled by default: repository testing records hangs at `2610000 KHz` and above on this hardware, so the 3GHz ceiling is a software limit, not a stability or safety claim. A target of `0` restores the saved stock idx0 frequency.
+
+When `cpu_volt_follow=1` (default), the module derives a candidate LUT voltage from the policy's existing OPP slope and rejects missing/invalid slope data or requests beyond the configured voltage limits. This edits the cpufreq-hw LUT; it does not prove that the physical PMIC rail reached the requested voltage.
 
 ## Parameters
 
@@ -99,24 +98,35 @@ echo 1 > $P/gpu_oc_apply
 
 | Parameter | Mode | Meaning |
 |---|---|---|
-| `cpu_ll_target_khz` | RW | Little-cluster idx0 target. `0` restores stock. |
-| `cpu_b_target_khz` | RW | Big-cluster idx0 target. `0` restores stock. |
-| `cpu_oc_apply` | RW | Write `1` to apply both CPU targets. |
+| Parameter | Mode | Meaning |
+|---|---|---|
+| `cpu_little_target_khz` | RW | Little policy idx0 target. `0` restores stock. |
+| `cpu_big_target_khz` | RW | Big policy idx0 target. `0` restores stock. |
+| `cpu_prime_target_khz` | RW | Third policy idx0 target; available only when a third policy is detected. |
+| `cpu_policy_targets_khz` | RW | Comma-separated target KHz for every detected policy, ordered by representative CPU. Use one value per policy; `0` restores that policy. |
+| `cpu_oc_apply` | RW | Write `1` to apply CPU targets. |
 | `cpu_oc_result` | RO | Result of the last CPU apply operation. |
-| `cpu_ll_rep_cpu` | RO | Little-cluster representative CPU. Default `0`. |
-| `cpu_b_rep_cpu` | RO | Big-cluster representative CPU. Default `6`. |
-| `cpu_ll_min_khz` | RW | Sets `policy->min` directly for the little cluster. |
-| `cpu_b_min_khz` | RW | Sets `policy->min` directly for the big cluster. |
-| `cpu_lut_table` | RO | Compares the RAM cpufreq table with the vendor MMIO LUT. |
-| `cpu_stats_refresh` | RW | Write `1` for little or `2` for big to rebuild `time_in_state`. |
+| `cpu_little_rep_cpu` | RO | Auto-detected representative CPU for the first policy. |
+| `cpu_big_rep_cpu` | RO | Auto-detected representative CPU for the second policy. |
+| `cpu_prime_rep_cpu` | RO | Auto-detected representative CPU for the third policy, or `UINT_MAX` if absent. |
+| `cpu_prime_status` | RO | `active`, `inactive`, or `error`. |
+| `cpu_oc_allow_3ghz` | RW | Set `1` to permit experimental targets above 2.6GHz up to 3GHz; disabled by default due to known hangs. |
+| `cpu_volt_follow` | RW | `1` derives candidate idx0 LUT voltage from the existing OPP slope; default `1`. |
+| `cpu_volt_max_delta_raw` | RW | Maximum voltage delta from stock, raw mV×100; default `20000`. |
+| `cpu_volt_abs_max_raw` | RW | Absolute candidate LUT voltage ceiling; hard-clamped to `115000`. |
+| `cpu_little_volt_raw` / `cpu_big_volt_raw` / `cpu_prime_volt_raw` | RW | Optional explicit candidate LUT voltage for each alias; `0` uses slope derivation. |
+| `cpu_volt_reassert` | RW | Reassert the candidate LUT voltage if EEM/SVS overwrites it. |
+| `cpu_little_min_khz` / `cpu_big_min_khz` / `cpu_prime_min_khz` | RW | Set the corresponding policy minimum frequency. |
+| `cpu_lut_table` | RO | Compare RAM cpufreq table with the vendor MMIO LUT. |
+| `cpu_stats_refresh` | RW | Write `1` for first policy or `2` for second policy to rebuild `time_in_state`. |
 
 CPU target example:
 
 ```bash
 P=/sys/module/overclock_mt6789/parameters
 
-echo 2100000 > $P/cpu_ll_target_khz
-echo 2500000 > $P/cpu_b_target_khz
+echo 2100000 > $P/cpu_little_target_khz
+echo 2500000 > $P/cpu_big_target_khz
 echo 1       > $P/cpu_oc_apply
 cat $P/cpu_oc_result
 cat $P/cpu_lut_table
@@ -127,14 +137,14 @@ Restore stock CPU top entries:
 ```bash
 P=/sys/module/overclock_mt6789/parameters
 
-echo 0 > $P/cpu_ll_target_khz
-echo 0 > $P/cpu_b_target_khz
+echo 0 > $P/cpu_little_target_khz
+echo 0 > $P/cpu_big_target_khz
 echo 1 > $P/cpu_oc_apply
 ```
 
 ## CPU minimum frequency
 
-`cpu_ll_min_khz` and `cpu_b_min_khz` write directly to the corresponding `struct cpufreq_policy::min` value. This is separate from the userspace `scaling_min_freq` file and is intended for kernels where that sysfs node is not writable.
+`cpu_little_min_khz`, `cpu_big_min_khz`, and `cpu_prime_min_khz` write directly to the corresponding `struct cpufreq_policy::min` value. This is separate from the userspace `scaling_min_freq` file and is intended for kernels where that sysfs node is not writable.
 
 The requested value is clamped to:
 
@@ -149,10 +159,10 @@ Example:
 ```bash
 P=/sys/module/overclock_mt6789/parameters
 
-echo 2000000 > $P/cpu_ll_min_khz
-echo 2000000 > $P/cpu_b_min_khz
-cat $P/cpu_ll_min_khz
-cat $P/cpu_b_min_khz
+echo 2000000 > $P/cpu_little_min_khz
+echo 2000000 > $P/cpu_big_min_khz
+cat $P/cpu_little_min_khz
+cat $P/cpu_big_min_khz
 ```
 
 When a CPU OC target is applied, the module also updates `policy->min` when the previous minimum is above the new top frequency or was tracking the previous `policy->max`.
