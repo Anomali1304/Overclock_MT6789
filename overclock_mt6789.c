@@ -528,6 +528,10 @@ static unsigned int cpu_prime_rep_cpu = UINT_MAX;
 /* Internal legacy buffer; no module parameter is exported for the list. */
 static char cpu_policy_targets_khz[128];
 static char cpu_policy_representatives[64] = "not detected";
+module_param_string(cpu_policy_targets_khz, cpu_policy_targets_khz,
+		    sizeof(cpu_policy_targets_khz), 0644);
+MODULE_PARM_DESC(cpu_policy_targets_khz,
+	"Comma-separated idx0 target KHz for every detected policy, in representative-CPU order; empty uses Little/Big/Prime aliases");
 module_param_named(cpu_little_rep_cpu, cpu_ll_rep_cpu, uint, 0444);
 module_param_named(cpu_big_rep_cpu, cpu_b_rep_cpu, uint, 0444);
 module_param(cpu_prime_rep_cpu, uint, 0444);
@@ -616,9 +620,9 @@ static int discover_cpu_policy_representatives(void)
 	return 0;
 }
 
-#define MAX_OC_PERCENT_OVER_STOCK  70
+#define MAX_OC_PERCENT_OVER_STOCK  100
 
-#define MAX_OC_ABSOLUTE_KHZ  2600000U
+#define MAX_OC_ABSOLUTE_KHZ  3000000U
 
 static unsigned int cpu_ll_target_khz = 0; /* exposed as cpu_little_target_khz */
 static unsigned int cpu_b_target_khz  = 0; /* exposed as cpu_big_target_khz */
@@ -812,7 +816,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	struct freq_qos_request qos_req;
 	unsigned int use_khz, cap_khz, old_max, new_volt, override_volt;
 	s64 dv = 0;
-	u32 raw;
+	u32 raw, orig_raw, verify_raw;
 	int ret, policy_idx;
 
 	policy = cpufreq_cpu_get(rep_cpu);
@@ -824,6 +828,12 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		return -ENODATA;
 	}
 	c = (struct cpufreq_mtk_mirror *)policy->driver_data;
+	if (!c || c->nr_opp < 2 || !c->reg_bases[REG_FREQ_LUT_TABLE] ||
+	    !c->reg_bases[REG_FREQ_PERF_STATE] ||
+	    !policy->freq_table[0].frequency || !policy->freq_table[1].frequency) {
+		cpufreq_cpu_put(policy);
+		return -ENODATA;
+	}
 	policy_idx = cpu_policy_index(rep_cpu);
 
 	if (!*have_orig) {
@@ -863,7 +873,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 				   CPU_VOLT_STEP_RAW;
 			if (new_volt < *orig_volt)
 				new_volt = *orig_volt;
-		} else if (c->nr_opp >= 4) {
+		} else if (cpu_volt_follow && c->nr_opp >= 4) {
 			u32 r1 = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + LUT_ROW_SIZE);
 			u32 r3 = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] + 3 * LUT_ROW_SIZE);
 			int df = (int)FIELD_GET(LUT_FREQ, r1) - (int)FIELD_GET(LUT_FREQ, r3);
@@ -874,10 +884,14 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 							    CPU_VOLT_STEP_RAW) * CPU_VOLT_STEP_RAW);
 				new_volt = *orig_volt + (unsigned int)dv;
 			} else {
-				pr_warn("oc_mt6789: cpu%u has no usable LUT voltage slope; frequency-only fallback\n", rep_cpu);
+				pr_err("oc_mt6789: cpu%u has no usable LUT voltage slope; refusing voltage-follow OC\n", rep_cpu);
+				cpufreq_cpu_put(policy);
+				return -ENODATA;
 			}
-		} else {
-			pr_warn("oc_mt6789: cpu%u has fewer than 4 OPPs; frequency-only fallback\n", rep_cpu);
+		} else if (cpu_volt_follow) {
+			pr_err("oc_mt6789: cpu%u has fewer than 4 OPPs; refusing voltage-follow OC\n", rep_cpu);
+			cpufreq_cpu_put(policy);
+			return -ENODATA;
 		}
 		if (new_volt - *orig_volt > cpu_volt_max_delta_raw ||
 		    new_volt > cpu_volt_abs_max()) {
@@ -889,6 +903,11 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		}
 	}
 
+	if (!FIELD_FIT(LUT_FREQ, use_khz / 1000) || !FIELD_FIT(LUT_VOLT, new_volt)) {
+		cpufreq_cpu_put(policy);
+		return -ERANGE;
+	}
+
 	old_max = policy->max;
 
 	ret = quiesce_off_idx0(policy, c, &qos_req);
@@ -897,11 +916,21 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 		return ret;
 	}
 
-	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
-	raw = (raw & ~(LUT_FREQ | LUT_VOLT)) |
+	orig_raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
+	raw = (orig_raw & ~(LUT_FREQ | LUT_VOLT)) |
 	      FIELD_PREP(LUT_FREQ, use_khz / 1000) |
 	      FIELD_PREP(LUT_VOLT, new_volt);
 	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE]);
+	verify_raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
+	if (FIELD_GET(LUT_FREQ, verify_raw) != use_khz / 1000 ||
+	    FIELD_GET(LUT_VOLT, verify_raw) != new_volt) {
+		writel_relaxed(orig_raw, c->reg_bases[REG_FREQ_LUT_TABLE]);
+		readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE]);
+		freq_qos_remove_request(&qos_req);
+		cpufreq_cpu_put(policy);
+		pr_err("oc_mt6789: cpu%u idx0 LUT readback mismatch; original row restored\n", rep_cpu);
+		return -EIO;
+	}
 	if (policy_idx >= 0) {
 		cpu_policy_applied_volt[policy_idx] = new_volt;
 		cpu_policy_voltage_active[policy_idx] =
@@ -1067,10 +1096,7 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 			 "FAIL: CPU apply failed (little=%d big=%d prime=%d)", ret_ll, ret_b, ret_prime);
 	else
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "OK: little=%uKHz big=%uKHz prime=%uKHz policies=%u",
-			 cpu_ll_target_khz ? cpu_ll_target_khz : g_ll_orig_khz,
-			 cpu_b_target_khz ? cpu_b_target_khz : g_b_orig_khz,
-			 (cpu_policy_count >= 3) ? (cpu_prime_target_khz ? cpu_prime_target_khz : cpu_policy_orig_khz[2]) : 0,
+			 "OK: applied %u policy targets in representative-CPU order",
 			 cpu_policy_count);
 
 	mutex_unlock(&oc_lock);
@@ -1097,6 +1123,8 @@ static int cpu_min_khz_set(unsigned int rep_cpu, unsigned int *requested,
 	if (kstrtouint(val, 10, &khz) || khz == 0)
 		return -EINVAL;
 
+	if (rep_cpu >= nr_cpu_ids)
+		return -ENODEV;
 	policy = cpufreq_cpu_get(rep_cpu);
 	if (!policy)
 		return -ENODEV;
@@ -2040,10 +2068,15 @@ static void __exit oc_mt6789_exit(void)
 	if (g_b_have_orig)
 		patch_cluster_idx0(cpu_b_rep_cpu, 0,
 			&g_b_orig_khz, &g_b_orig_volt, &g_b_have_orig);
-	if (cpu_policy_count >= 3 && cpu_policy_have_orig[2])
-		patch_cluster_idx0(cpu_policy_reps[2], 0,
-			&cpu_policy_orig_khz[2], &cpu_policy_orig_volt[2],
-			&cpu_policy_have_orig[2]);
+	{
+		unsigned int i;
+		for (i = 0; i < cpu_policy_count; i++) {
+			if (cpu_policy_have_orig[i])
+				patch_cluster_idx0(cpu_policy_reps[i], 0,
+					&cpu_policy_orig_khz[i], &cpu_policy_orig_volt[i],
+					&cpu_policy_have_orig[i]);
+		}
+	}
 	mutex_unlock(&oc_lock);
 
 	if (g_apmixed_va) {
