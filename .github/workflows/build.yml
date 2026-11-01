@@ -2,14 +2,14 @@ name: Build
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, sysfs]
     paths:
-      - 'overclock_mt6789.c'
+      - 'sysfs.c'
       - 'Makefile'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
-      - 'overclock_mt6789.c'
+      - 'sysfs.c'
       - 'Makefile'
       - '.github/workflows/build.yml'
   workflow_dispatch:
@@ -99,12 +99,12 @@ jobs:
       - name: Verify output
         working-directory: overclock_mt6789
         run: |
-          test -f overclock_mt6789.ko
-          ls -lh overclock_mt6789.ko
-          strings overclock_mt6789.ko | grep '^vermagic='
+          test -f sysfs.ko
+          ls -lh sysfs.ko
+          strings sysfs.ko | grep '^vermagic='
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: overclock_mt6789.ko
-          path: overclock_mt6789/overclock_mt6789.ko
+          name: sysfs.ko
+          path: overclock_mt6789/sysfs.ko

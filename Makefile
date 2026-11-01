@@ -2,7 +2,7 @@ KDIR      ?= $(HOME)/OSS/common
 WORKSPACE ?= $(HOME)/OSS
 ARCH      := arm64
 
-obj-m := overclock_mt6789.o
+obj-m := sysfs.o
 
 CLANG_PREBUILT_BIN := $(shell \
   grep -E "^CLANG_PREBUILT_BIN=" $(WORKSPACE)/common/build.config.common \
@@ -35,7 +35,7 @@ all:
 		echo "  Run 'make check-clang WORKSPACE=...' to diagnose."; \
 		exit 1; \
 	fi
-	@echo "  [overclock_mt6789] Using Clang: $(CLANG_PATH)/clang"
+	@echo "  [sysfs] Using Clang: $(CLANG_PATH)/clang"
 	@$(CLANG_PATH)/clang --version 2>/dev/null | head -1
 	PATH="$(CLANG_PATH):$$PATH" $(MAKE) -C $(KDIR) M=$(CURDIR) \
 	  ARCH=$(ARCH) \
@@ -47,9 +47,9 @@ all:
 	  EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
 	  modules
 	@if [ -x "$(CLANG_PATH)/llvm-strip" ]; then \
-		$(CLANG_PATH)/llvm-strip --strip-debug overclock_mt6789.ko; \
-		echo "  [overclock_mt6789] Stripped debug info:"; \
-		ls -lh overclock_mt6789.ko; \
+		$(CLANG_PATH)/llvm-strip --strip-debug sysfs.ko; \
+		echo "  [sysfs] Stripped debug info:"; \
+		ls -lh sysfs.ko; \
 	else \
 		echo "WARNING: llvm-strip not found at $(CLANG_PATH) — shipping unstripped .ko."; \
 	fi
@@ -58,13 +58,13 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 
 install:
-	adb push overclock_mt6789.ko /data/local/tmp/
-	adb shell su -c "insmod /data/local/tmp/overclock_mt6789.ko"
+	adb push sysfs.ko /data/local/tmp/
+	adb shell su -c "insmod /data/local/tmp/sysfs.ko"
 	@sleep 1
-	adb shell su -c "dmesg | grep oc_mt6789 | tail -20"
+	adb shell su -c "dmesg | grep sysfs_gpu | tail -20"
 
 uninstall:
-	adb shell su -c "rmmod overclock_mt6789 && echo OK"
+	adb shell su -c "rmmod sysfs && echo OK"
 
 check-clang:
 	@echo "WORKSPACE    : $(WORKSPACE)"
