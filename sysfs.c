@@ -500,17 +500,17 @@ static int __init sysfs_gpu_module_init(void)
 	int ret = sysfs_gpu_init();
 
 	if (ret) {
-		pr_err("sysfs_gpu: failed to create /sys/kernel/gpu (%d)\\n", ret);
+		pr_err("sysfs_gpu: failed to create /sys/kernel/gpu (%d)\n", ret);
 		return ret;
 	}
-	pr_info("sysfs_gpu: GPU sysfs interface ready at /sys/kernel/gpu\\n");
+	pr_info("sysfs_gpu: GPU sysfs interface ready at /sys/kernel/gpu\n");
 	return 0;
 }
 
 static void __exit sysfs_gpu_module_exit(void)
 {
 	sysfs_gpu_exit();
-	pr_info("sysfs_gpu: unloaded\\n");
+	pr_info("sysfs_gpu: unloaded\n");
 }
 
 module_init(sysfs_gpu_module_init);
