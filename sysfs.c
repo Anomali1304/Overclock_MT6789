@@ -20,9 +20,9 @@ enum gpufreq_posdiv {
 };
 
 enum gpufreq_target {
-	TARGET_STACK = 0,
+	TARGET_DEFAULT = 0,
 	TARGET_GPU = 1,
-	TARGET_DEFAULT = 2,
+	TARGET_STACK = 2,
 };
 
 struct gpufreq_opp_info {
@@ -36,9 +36,11 @@ struct gpufreq_opp_info {
 
 typedef const struct gpufreq_opp_info *(*fn_get_wt_t)(enum gpufreq_target);
 typedef int (*fn_get_opp_num_t)(enum gpufreq_target);
+typedef unsigned int (*fn_get_freq_by_idx_t)(enum gpufreq_target, int);
 
 static fn_get_wt_t sym_gpufreq_get_working_table;
 static fn_get_opp_num_t sym_gpufreq_get_opp_num;
+static fn_get_freq_by_idx_t ski_get_freq_by_idx;
 
 static __nocfi int sysfs_kprobe_nop(struct kprobe *kp, struct pt_regs *regs)
 {
@@ -98,6 +100,11 @@ static __nocfi bool ski_resolve_helpers(void)
 		if (addr)
 			sym_gpufreq_get_opp_num = (fn_get_opp_num_t)addr;
 	}
+	if (!ski_get_freq_by_idx) {
+		addr = resolve_ksym("gpufreq_get_freq_by_idx");
+		if (addr)
+			ski_get_freq_by_idx = (fn_get_freq_by_idx_t)addr;
+	}
 	if (!ski_cur_freq) {
 		addr = resolve_ksym("gpufreq_get_cur_freq");
 		if (addr)
@@ -132,7 +139,7 @@ static __nocfi bool ski_resolve_helpers(void)
 	return sym_gpufreq_get_working_table && sym_gpufreq_get_opp_num &&
 	       ski_cur_freq && ski_get_loading &&
 	       ski_custom_boost && ski_custom_upbound && ski_get_bottom &&
-	       ski_get_ceiling;
+	       ski_get_ceiling && ski_get_freq_by_idx;
 }
 
 static __nocfi const struct gpufreq_opp_info *ski_gpu_table(int *count)
@@ -381,18 +388,28 @@ static __nocfi ssize_t gpu_freq_table_show(struct kobject *kobj,
 static __nocfi ssize_t gpu_max_clock_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	const struct gpufreq_opp_info *table;
 	unsigned int khz;
-	int count = 0, idx = 0;
+	int count, idx = 0;
 
-	table = ski_gpu_table(&count);
-	if (!table)
+	if (!ski_resolve_helpers())
 		return -EAGAIN;
-	if (!ski_get_ceiling(&idx) || idx < 0 || idx >= count)
-		idx = 0;
-	khz = table[idx].freq;
+
+	count = sym_gpufreq_get_opp_num(TARGET_DEFAULT);
+	if (count <= 0 || count > GPU_OPP_MAX)
+		return -EINVAL;
+
+	if (!ski_get_ceiling(&idx))
+		return -EIO;
+	if (idx < 0 || idx >= count)
+		return -EINVAL;
+
+	khz = ski_get_freq_by_idx(TARGET_DEFAULT, idx);
+	if (!khz)
+		return -EINVAL;
+
 	if (ski_custom_max_khz && ski_custom_max_khz < khz)
 		khz = ski_custom_max_khz;
+
 	return scnprintf(buf, PAGE_SIZE, "%u\n", khz);
 }
 
