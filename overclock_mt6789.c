@@ -1633,7 +1633,7 @@ static int cpu_stats_refresh_set(const char *val,
 
 static int cpu_stats_refresh_get(char *buf, const struct kernel_param *kp)
 {
-	return scnprintf(buf, PAGE_SIZE, "%s\\n",
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
 			 cpu_stats_refresh_result);
 }
 
