@@ -1529,7 +1529,8 @@ static __nocfi int do_stats_refresh(unsigned int rep_cpu, unsigned int cur_khz)
 {
 	struct cpufreq_policy *policy;
 
-	if (!sym_cpufreq_stats_free_table || !sym_cpufreq_stats_create_table)
+	if (!sym_cpufreq_stats_free_table ||
+	    !sym_cpufreq_stats_create_table)
 		return -ENOSYS;
 
 	policy = cpufreq_cpu_get(rep_cpu);
@@ -1537,61 +1538,117 @@ static __nocfi int do_stats_refresh(unsigned int rep_cpu, unsigned int cur_khz)
 		return -ENODEV;
 
 	down_write(&policy->rwsem);
+
 	if (cur_khz)
 		policy->cur = cur_khz;
+
 	sym_cpufreq_stats_free_table(policy);
 	sym_cpufreq_stats_create_table(policy);
+
 	up_write(&policy->rwsem);
 
 	cpufreq_cpu_put(policy);
 	return 0;
 }
 
-static int cpu_stats_refresh_set(const char *val, const struct kernel_param *kp)
+static int cpu_stats_refresh_set(const char *val,
+				 const struct kernel_param *kp)
 {
 	unsigned int which;
+	unsigned int rep_cpu;
+	unsigned int target_khz;
+	const char *cluster;
 	int ret;
 
 	if (kstrtouint(val, 10, &which))
 		return -EINVAL;
 
-
-	if (which != 1 && which != 2)
+	if (which < 1 || which > 3)
 		return -EINVAL;
 
 	if (atomic_read(&oc_mt6789_suspended)) {
-		snprintf(cpu_stats_refresh_result, sizeof(cpu_stats_refresh_result),
+		snprintf(cpu_stats_refresh_result,
+			 sizeof(cpu_stats_refresh_result),
 			 "FAIL: device suspending, refused");
 		return 0;
 	}
 
+	switch (which) {
+	case 1:
+		rep_cpu = cpu_ll_rep_cpu;
+		target_khz = cpu_ll_target_khz;
+		cluster = "Little";
+		break;
+
+	case 2:
+		rep_cpu = cpu_b_rep_cpu;
+		target_khz = cpu_b_target_khz;
+		cluster = "Big";
+		break;
+
+	case 3:
+		if (cpu_policy_count < 3 ||
+		    cpu_prime_rep_cpu == UINT_MAX) {
+			snprintf(cpu_stats_refresh_result,
+				 sizeof(cpu_stats_refresh_result),
+				 "FAIL: Prime policy unavailable");
+			return 0;
+		}
+
+		rep_cpu = cpu_prime_rep_cpu;
+		target_khz = cpu_prime_target_khz;
+		cluster = "Prime";
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
 	mutex_lock(&oc_lock);
-	ret = do_stats_refresh(which == 1 ? cpu_ll_rep_cpu : cpu_b_rep_cpu,
-				which == 1 ? cpu_ll_target_khz : cpu_b_target_khz);
-	if (ret == -ENOSYS)
-		snprintf(cpu_stats_refresh_result, sizeof(cpu_stats_refresh_result),
+
+	ret = do_stats_refresh(rep_cpu, target_khz);
+
+	if (ret == -ENOSYS) {
+		snprintf(cpu_stats_refresh_result,
+			 sizeof(cpu_stats_refresh_result),
 			 "FAIL: stats symbols not resolved");
-	else if (ret == -ENODEV)
-		snprintf(cpu_stats_refresh_result, sizeof(cpu_stats_refresh_result),
-			 "FAIL: cpu%u not found/online", which == 1 ? cpu_ll_rep_cpu : cpu_b_rep_cpu);
-	else
-		snprintf(cpu_stats_refresh_result, sizeof(cpu_stats_refresh_result),
-			 "OK: refreshed cluster %u — check time_in_state now", which);
+	} else if (ret == -ENODEV) {
+		snprintf(cpu_stats_refresh_result,
+			 sizeof(cpu_stats_refresh_result),
+			 "FAIL: CPU%u not found/online", rep_cpu);
+	} else if (ret) {
+		snprintf(cpu_stats_refresh_result,
+			 sizeof(cpu_stats_refresh_result),
+			 "FAIL: refresh error %d", ret);
+	} else {
+		snprintf(cpu_stats_refresh_result,
+			 sizeof(cpu_stats_refresh_result),
+			 "OK: refreshed %s policy CPU%u",
+			 cluster, rep_cpu);
+	}
+
 	mutex_unlock(&oc_lock);
 	return 0;
 }
+
 static int cpu_stats_refresh_get(char *buf, const struct kernel_param *kp)
 {
-	return scnprintf(buf, PAGE_SIZE, "%s\n", cpu_stats_refresh_result);
+	return scnprintf(buf, PAGE_SIZE, "%s\\n",
+			 cpu_stats_refresh_result);
 }
+
 static const struct kernel_param_ops cpu_stats_refresh_ops = {
 	.set = cpu_stats_refresh_set,
 	.get = cpu_stats_refresh_get,
 };
-static int cpu_stats_refresh_dummy = 0;
-module_param_cb(cpu_stats_refresh, &cpu_stats_refresh_ops, &cpu_stats_refresh_dummy, 0644);
-MODULE_PARM_DESC(cpu_stats_refresh, "Write 1=little / 2=big to rebuild that cluster's time_in_state table after a CPU OC apply");
 
+static int cpu_stats_refresh_dummy;
+
+module_param_cb(cpu_stats_refresh, &cpu_stats_refresh_ops,
+		&cpu_stats_refresh_dummy, 0644);
+
+MODULE_PARM_DESC(cpu_stats_refresh,
+		 "Write 1=Little, 2=Big, 3=Prime to rebuild time_in_state table");
 
 
 /* -------------------------------------------------------------------------
