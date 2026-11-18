@@ -626,15 +626,15 @@ static int discover_cpu_policy_representatives(void)
 	return 0;
 }
 
-#define MAX_OC_PERCENT_OVER_STOCK  150
+#define MAX_OC_PERCENT_OVER_STOCK  166
 #define MAX_OC_KNOWN_HANG_KHZ      2600000U
-#define MAX_OC_ABSOLUTE_KHZ        4550000U
+#define MAX_OC_ABSOLUTE_KHZ        4095000U
 
 /* Explicit opt-in required above the previously tested 2.6GHz ceiling. */
 static unsigned int cpu_oc_allow_4ghz;
 module_param(cpu_oc_allow_4ghz, uint, 0644);
 MODULE_PARM_DESC(cpu_oc_allow_4ghz,
-	"Set to 1 to permit experimental CPU targets above 2.6GHz up to 4.55GHz; higher clocks are known to hang on this device");
+	"Set to 1 to permit experimental CPU targets above 2.6GHz up to 4.095GHz; higher clocks are known to hang on this device");
 
 static unsigned int cpu_ll_target_khz = 0; /* exposed as cpu_little_target_khz */
 static unsigned int cpu_b_target_khz  = 0; /* exposed as cpu_big_target_khz */
@@ -1155,7 +1155,7 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 			 ret_ll, ret_b, ret_prime, cpu_volt_max_delta_raw, cpu_volt_abs_max());
 	else if (ret_ll == -EPERM || ret_b == -EPERM || ret_prime == -EPERM)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: target above 2.6GHz requires cpu_oc_allow_4ghz=1 (experimental; max 4.55GHz)");
+			 "FAIL: target above 2.6GHz requires cpu_oc_allow_4ghz=1 (experimental; max 4.095GHz)");
 	else if (ret_ll == -ERANGE || ret_b == -ERANGE || ret_prime == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: target exceeds OC limit (little=%u big=%u prime=%u KHz)",
