@@ -632,9 +632,9 @@ static int discover_cpu_policy_representatives(void)
 #define MAX_OC_ABSOLUTE_KHZ        4550000U
 
 /* Explicit opt-in required above the previously tested 2.6GHz ceiling. */
-static unsigned int cpu_oc_allow_4550;
-module_param(cpu_oc_allow_4550, uint, 0644);
-MODULE_PARM_DESC(cpu_oc_allow_4550,
+static unsigned int cpu_oc_allow_4ghz;
+module_param(cpu_oc_allow_4ghz, uint, 0644);
+MODULE_PARM_DESC(cpu_oc_allow_4ghz,
 	"Set to 1 to permit experimental CPU targets above 2.6GHz up to 4.55GHz; higher clocks are known to hang on this device");
 
 static unsigned int cpu_ll_target_khz = 0; /* exposed as cpu_little_target_khz */
@@ -868,7 +868,7 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 			cpufreq_cpu_put(policy);
 			return -ERANGE;
 		}
-		if (target_khz > MAX_OC_KNOWN_HANG_KHZ && !cpu_oc_allow_4550) {
+		if (target_khz > MAX_OC_KNOWN_HANG_KHZ && !cpu_oc_allow_4ghz) {
 			cpufreq_cpu_put(policy);
 			return -EPERM;
 		}
@@ -1163,7 +1163,7 @@ static int cpu_oc_apply_set(const char *val, const struct kernel_param *kp)
 			 ret_ll, ret_b, ret_prime, cpu_volt_max_delta_raw, cpu_volt_abs_max());
 	else if (ret_ll == -EPERM || ret_b == -EPERM || ret_prime == -EPERM)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
-			 "FAIL: target above 2.6GHz requires cpu_oc_allow_4550=1 (experimental; max 4.55GHz)");
+			 "FAIL: target above 2.6GHz requires cpu_oc_allow_4ghz=1 (experimental; max 4.55GHz)");
 	else if (ret_ll == -ERANGE || ret_b == -ERANGE || ret_prime == -ERANGE)
 		snprintf(cpu_oc_result, sizeof(cpu_oc_result),
 			 "FAIL: target exceeds OC limit (little=%u big=%u prime=%u KHz)",
@@ -2095,7 +2095,7 @@ static int __init oc_mt6789_init(void)
 		pr_warn("oc_mt6789: CPU policy auto-discovery failed; CPU OC apply will fail safely until policies are available\n");
 
 	pr_info("overclock_mt6789: init (GPU working_table patch + CPU cpufreq-hw LUT patch)\n");
-	pr_info("oc_mt6789: CPU cap = stock +%d%%, %uMHz absolute; targets above %uMHz require cpu_oc_allow_4550=1\n",
+	pr_info("oc_mt6789: CPU cap = stock +%d%%, %uMHz absolute; targets above %uMHz require cpu_oc_allow_4ghz=1\n",
 		MAX_OC_PERCENT_OVER_STOCK, MAX_OC_ABSOLUTE_KHZ / 1000,
 		MAX_OC_KNOWN_HANG_KHZ / 1000);
 
