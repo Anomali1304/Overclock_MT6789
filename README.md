@@ -45,11 +45,11 @@ Before modifying a live LUT row, the module temporarily caps the policy to the n
 CPU targets are limited to the lower of:
 
 ```text
-stock_idx0 + 100%
-4550000 KHz
+stock_idx0 + 166%
+4095000 KHz
 ```
 
-Targets above `2600000 KHz` are refused by default. Set `cpu_oc_allow_4ghz=1` to opt in to the experimental `2601000..4550000 KHz` range. This is deliberately disabled by default: repository testing records hangs at `2610000 KHz` and above on this hardware, so the 4.55GHz ceiling is a software limit, not a stability or safety claim. A target of `0` restores the saved stock idx0 frequency.
+Targets above `2600000 KHz` are refused by default. Set `cpu_oc_allow_4ghz=1` to opt in to the experimental `2601000..4095000 KHz` range. This is deliberately disabled by default: repository testing records hangs at `2610000 KHz` and above on this hardware, so the 4.095GHz ceiling is a software limit, not a stability or safety claim. A target of `0` restores the saved stock idx0 frequency.
 
 When `cpu_volt_follow=1` (default), the module derives a candidate LUT voltage from the policy's existing OPP slope and rejects missing/invalid slope data or requests beyond the configured voltage limits. This edits the cpufreq-hw LUT; it does not prove that the physical PMIC rail reached the requested voltage.
 
@@ -194,7 +194,7 @@ This kernel enforces `CONFIG_CFI_CLANG`. Every function reached through a `kalls
 
 ### What the module already checks
 
-The CPU path validates targets against the stock-frequency-derived limit and the 4550 MHz absolute ceiling. Targets above 2600 MHz require the explicit `cpu_oc_allow_4ghz=1` opt-in. It verifies that the cluster leaves idx0 and checks MMIO readback before accepting a LUT update. The GPU PLL path uses the MediaTek frequency-hopping function for the PCW transition and never writes the PLL target synchronously from the apply parameter handler.
+The CPU path validates targets against the stock-frequency-derived limit and the 4095 MHz absolute ceiling. Targets above 2600 MHz require the explicit `cpu_oc_allow_4ghz=1` opt-in. It verifies that the cluster leaves idx0 and checks MMIO readback before accepting a LUT update. The GPU PLL path uses the MediaTek frequency-hopping function for the PCW transition and never writes the PLL target synchronously from the apply parameter handler.
 
 None of that makes a wrong target, an incompatible kernel tree, or a vendor-driver change safe to try blind. Test changes incrementally and keep a known-good kernel available.
 
