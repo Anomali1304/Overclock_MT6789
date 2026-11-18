@@ -113,7 +113,7 @@ echo 1 > $P/gpu_oc_apply
 | `cpu_oc_allow_4ghz` | RW | Set `1` to permit experimental targets above 2.6GHz up to 4.55GHz; disabled by default due to known hangs. |
 | `cpu_volt_follow` | RW | `1` derives candidate idx0 LUT voltage from the existing OPP slope; default `1`. |
 | `cpu_volt_max_delta_raw` | RW | Maximum voltage delta from stock, raw mV×100; default `20000`. |
-| `cpu_volt_abs_max_raw` | RW | Absolute candidate LUT voltage ceiling; hard-clamped to `115000`. |
+| `cpu_volt_abs_max_raw` | RW | Absolute candidate LUT voltage ceiling; no fixed software voltage cap, bounded by the 17-bit LUT field and 625-raw voltage step. |
 | `cpu_little_volt_raw` / `cpu_big_volt_raw` / `cpu_prime_volt_raw` | RW | Optional explicit candidate LUT voltage for each alias; `0` uses slope derivation. |
 | `cpu_volt_reassert` | RW | Reassert the candidate LUT voltage if EEM/SVS overwrites it. |
 | `cpu_little_min_khz` / `cpu_big_min_khz` / `cpu_prime_min_khz` | RW | Set the corresponding policy minimum frequency. |
@@ -219,7 +219,7 @@ Parameters are under `/sys/module/overclock_mt6789/parameters/`:
 | `cpu_big_volt_raw` | Optional explicit Big-policy idx0 voltage; `0` uses the slope derived from LUT rows 1 and 3. |
 | `cpu_prime_volt_raw` | Optional explicit third-policy idx0 voltage; available only when a third policy is detected. |
 | `cpu_volt_max_delta_raw` | Maximum increase over the captured stock idx0 value; default `20000` (= 200 mV in the project's raw-unit convention). |
-| `cpu_volt_abs_max_raw` | Final candidate ceiling; default `112000` (= 1.12 V), hard-clamped at `115000` (= 1.15 V). |
+| `cpu_volt_abs_max_raw` | Final candidate ceiling; default `112000` (= 1.12 V). No fixed software ceiling. The encoded value must fit the 17-bit LUT voltage field after 625-raw step rounding. |
 | `cpu_volt_reassert` | Default `1`: guardian checks the idx0 LUT voltage every 50 ms and rewrites only that field if it changes. |
 | `cpu_lut_table` | Read-only dump now includes the LUT voltage field in raw units. |
 
@@ -239,7 +239,7 @@ cat "$P/cpu_oc_result"
 cat "$P/cpu_lut_table"
 ```
 
-Voltage raw values use the source project's `mV*100` convention, rounded upward to a 625-raw step. Explicit values cannot request less than the captured stock idx0 voltage. When voltage follow is enabled, the module rejects missing/invalid slope data and requests that exceed either voltage limit before writing the LUT. Setting `cpu_volt_follow=0` explicitly selects frequency-only behavior unless an explicit voltage override is supplied.
+Voltage raw values use the source project's `mV*100` convention, rounded upward to a 625-raw step. Explicit values cannot request less than the captured stock idx0 voltage. When voltage follow is enabled, the module rejects missing/invalid slope data and requests that exceed either configured voltage limit before writing the LUT. The ABS parameter has no fixed 1.15 V clamp, but the encoded value must fit `LUT_VOLT` (17 bits) after 625-raw step rounding. Setting `cpu_volt_follow=0` explicitly selects frequency-only behavior unless an explicit voltage override is supplied.
 
 **Hardware caveats:** `LUT_VOLT = bits[28:12]` is inferred from MT6789 LUT/EEM correlation, not an official register contract. EEM/SVS may rewrite this field, which is why reassertion is optional. Reasserting a LUT field is not proof that the PMIC/MCUPM rail changed. The supplied reference project's on-device observations reported A55 rail response but no corresponding A76 rail response; treat A76 as frequency-only unless actual rail telemetry on this exact device proves otherwise. Do not treat the example frequencies or voltages as stable recommendations. Verify stock LUT values, live readback, EEM reports, rail telemetry and stress stability on-device; keep a known-good boot image.
 
