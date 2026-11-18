@@ -110,7 +110,7 @@ echo 1 > $P/gpu_oc_apply
 | `cpu_big_rep_cpu` | RO | Auto-detected representative CPU for the second policy. |
 | `cpu_prime_rep_cpu` | RO | Auto-detected representative CPU for the third policy, or `UINT_MAX` if absent. |
 | `cpu_prime_status` | RO | `active`, `inactive`, or `error`. |
-| `cpu_oc_allow_4ghz` | RW | Set `1` to permit experimental targets above 2.6GHz up to 4.55GHz; disabled by default due to known hangs. |
+| `cpu_oc_allow_4ghz` | RW | Set `1` to permit experimental targets above 2.6GHz up to 4.095GHz; disabled by default due to known hangs. |
 | `cpu_volt_follow` | RW | `1` derives candidate idx0 LUT voltage from the existing OPP slope; default `1`. |
 | `cpu_volt_max_delta_raw` | RW | Maximum voltage delta from stock, raw mV×100; default `20000`. |
 | `cpu_volt_abs_max_raw` | RW | Absolute candidate LUT voltage ceiling; no fixed software voltage cap, bounded by the 17-bit LUT field and 625-raw voltage step. |
