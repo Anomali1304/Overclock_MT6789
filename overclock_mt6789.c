@@ -493,7 +493,6 @@ MODULE_PARM_DESC(gpu_oc_apply, "Write 1 to apply gpu_target_khz/volt/vsram to OP
 #define CPU_VOLT_STEP_RAW       625U
 #define CPU_VOLT_DELTA_DEFAULT  20000U
 #define CPU_VOLT_ABS_DEFAULT    112000U
-#define CPU_VOLT_ABS_HARD_MAX   115000U
 
 enum {
 	REG_FREQ_LUT_TABLE,
@@ -731,7 +730,7 @@ MODULE_PARM_DESC(cpu_volt_follow, "1=derive idx0 LUT voltage above stock; 0=freq
 module_param(cpu_volt_max_delta_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_volt_max_delta_raw, "Maximum LUT voltage increase over stock, raw mV*100; default +200mV");
 module_param(cpu_volt_abs_max_raw, uint, 0644);
-MODULE_PARM_DESC(cpu_volt_abs_max_raw, "Final LUT voltage ceiling raw mV*100; hard-clamped to 115000 (1.15V)");
+MODULE_PARM_DESC(cpu_volt_abs_max_raw, "Final LUT voltage ceiling raw mV*100; limited by the LUT voltage field width");
 module_param_named(cpu_little_volt_raw, cpu_ll_volt_raw, uint, 0644);
 MODULE_PARM_DESC(cpu_little_volt_raw, "Explicit A55 idx0 LUT voltage raw mV*100; 0=derive from LUT slope");
 module_param_named(cpu_big_volt_raw, cpu_b_volt_raw, uint, 0644);
@@ -770,8 +769,7 @@ static unsigned int g_prime_applied_target_khz;
 
 static unsigned int cpu_volt_abs_max(void)
 {
-	return min_t(unsigned int, cpu_volt_abs_max_raw,
-		     CPU_VOLT_ABS_HARD_MAX);
+	return cpu_volt_abs_max_raw;
 }
 
 #define QUIESCE_POLL_US     500U
@@ -893,12 +891,6 @@ static int patch_cluster_idx0(unsigned int rep_cpu, unsigned int target_khz,
 	}
 	if (use_khz > *orig_khz && (cpu_volt_follow || override_volt)) {
 		if (override_volt) {
-			if (override_volt > CPU_VOLT_ABS_HARD_MAX) {
-				pr_err("oc_mt6789: cpu%u explicit LUT voltage %u exceeds hard limit %u\n",
-				       rep_cpu, override_volt, CPU_VOLT_ABS_HARD_MAX);
-				cpufreq_cpu_put(policy);
-				return -EOVERFLOW;
-			}
 			new_volt = DIV_ROUND_UP(override_volt, CPU_VOLT_STEP_RAW) *
 				   CPU_VOLT_STEP_RAW;
 			if (new_volt < *orig_volt)
