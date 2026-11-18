@@ -46,10 +46,10 @@ CPU targets are limited to the lower of:
 
 ```text
 stock_idx0 + 100%
-4000000 KHz
+4550000 KHz
 ```
 
-Targets above `2600000 KHz` are refused by default. Set `cpu_oc_allow_4ghz=1` to opt in to the experimental `2601000..4000000 KHz` range. This is deliberately disabled by default: repository testing records hangs at `2610000 KHz` and above on this hardware, so the 4GHz ceiling is a software limit, not a stability or safety claim. A target of `0` restores the saved stock idx0 frequency.
+Targets above `2600000 KHz` are refused by default. Set `cpu_oc_allow_4550=1` to opt in to the experimental `2601000..4550000 KHz` range. This is deliberately disabled by default: repository testing records hangs at `2610000 KHz` and above on this hardware, so the 4.55GHz ceiling is a software limit, not a stability or safety claim. A target of `0` restores the saved stock idx0 frequency.
 
 When `cpu_volt_follow=1` (default), the module derives a candidate LUT voltage from the policy's existing OPP slope and rejects missing/invalid slope data or requests beyond the configured voltage limits. This edits the cpufreq-hw LUT; it does not prove that the physical PMIC rail reached the requested voltage.
 
@@ -110,7 +110,7 @@ echo 1 > $P/gpu_oc_apply
 | `cpu_big_rep_cpu` | RO | Auto-detected representative CPU for the second policy. |
 | `cpu_prime_rep_cpu` | RO | Auto-detected representative CPU for the third policy, or `UINT_MAX` if absent. |
 | `cpu_prime_status` | RO | `active`, `inactive`, or `error`. |
-| `cpu_oc_allow_4ghz` | RW | Set `1` to permit experimental targets above 2.6GHz up to 4GHz; disabled by default due to known hangs. |
+| `cpu_oc_allow_4550` | RW | Set `1` to permit experimental targets above 2.6GHz up to 4.55GHz; disabled by default due to known hangs. |
 | `cpu_volt_follow` | RW | `1` derives candidate idx0 LUT voltage from the existing OPP slope; default `1`. |
 | `cpu_volt_max_delta_raw` | RW | Maximum voltage delta from stock, raw mV×100; default `20000`. |
 | `cpu_volt_abs_max_raw` | RW | Absolute candidate LUT voltage ceiling; hard-clamped to `115000`. |
@@ -194,7 +194,7 @@ This kernel enforces `CONFIG_CFI_CLANG`. Every function reached through a `kalls
 
 ### What the module already checks
 
-The CPU path validates targets against the stock-frequency-derived limit and the 4000 MHz absolute ceiling. Targets above 2600 MHz require the explicit `cpu_oc_allow_4ghz=1` opt-in. It verifies that the cluster leaves idx0 and checks MMIO readback before accepting a LUT update. The GPU PLL path uses the MediaTek frequency-hopping function for the PCW transition and never writes the PLL target synchronously from the apply parameter handler.
+The CPU path validates targets against the stock-frequency-derived limit and the 4550 MHz absolute ceiling. Targets above 2600 MHz require the explicit `cpu_oc_allow_4550=1` opt-in. It verifies that the cluster leaves idx0 and checks MMIO readback before accepting a LUT update. The GPU PLL path uses the MediaTek frequency-hopping function for the PCW transition and never writes the PLL target synchronously from the apply parameter handler.
 
 None of that makes a wrong target, an incompatible kernel tree, or a vendor-driver change safe to try blind. Test changes incrementally and keep a known-good kernel available.
 
